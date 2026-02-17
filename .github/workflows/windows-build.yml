@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing release tag to attach the Windows zip (example: v0.0.1-alpha)
+        description: "Existing release tag to attach the Windows zip (example: v0.0.1-alpha)"
         required: true
         type: string
   release:
