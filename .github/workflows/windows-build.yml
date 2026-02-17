@@ -1,0 +1,55 @@
+name: Build Windows Executable
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Build EXE with PyInstaller
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name CWKeyTrainer --collect-all PySide6 --hidden-import sounddevice app.py
+
+      - name: Package output
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item dist/CWKeyTrainer.exe package/
+          if (Test-Path config.yaml) { Copy-Item config.yaml package/ }
+          if (Test-Path README.md) { Copy-Item README.md package/ }
+          $tag = "${{ github.event.release.tag_name }}"
+          Compress-Archive -Path package\* -DestinationPath "CWKeyTrainer-windows-$tag.zip" -Force
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CWKeyTrainer-windows
+          path: CWKeyTrainer-windows-*.zip
+
+      - name: Upload asset to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: CWKeyTrainer-windows-*.zip

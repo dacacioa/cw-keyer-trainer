@@ -1,0 +1,60 @@
+audio:
+  sample_rate: 48000
+  input_device: 3
+  output_device: 10
+  blocksize: 1024
+  channels: 1
+decoder:
+  sample_rate: 48000
+  frame_ms: 10.0
+  target_tone_hz: 600.0
+  auto_tone: false
+  tone_search_min_hz: 300.0
+  tone_search_max_hz: 1200.0
+  threshold_on_mult: 4.0
+  threshold_off_mult: 2.4
+  agc_alpha: 0.03
+  power_smooth_alpha: 1.0
+  wpm_target: 23.0
+  auto_wpm: false
+  dot_ms_min: 25.0
+  dot_ms_max: 220.0
+  min_key_down_ms: 12.0
+  min_key_up_ms: 12.0
+  min_key_down_dot_ratio: 0.28
+  min_key_up_dot_ratio: 0.0
+  dash_threshold_dots: 2.2
+  gap_char_threshold_dots: 1.8
+  gap_word_threshold_dots: 5.0
+  message_gap_dots: 12.0
+  message_gap_seconds: 0.82
+  prosign_literal: BK
+encoder:
+  sample_rate: 48000
+  tone_hz: 550.0
+  wpm: 19.0
+  farnsworth_wpm: null
+  volume: 0.25
+  attack_ms: 4.0
+  release_ms: 6.0
+  prosign_tokens:
+  - BK
+qso:
+  my_call: EA3IPX
+  other_call: N1MM
+  cq_mode: SIMPLE
+  other_calls_file: data\other_calls.csv
+  auto_incoming_after_qso: true
+  auto_incoming_probability: 0.5
+  require_k1: false
+  allow_599: false
+  allow_tu: false
+  direct_report_mode: true
+  use_prosigns: true
+  prosign_literal: BK
+  s4_prefix: RR
+  ignore_bk: true
+  ignore_fill_tokens:
+  - RR
+  - R
+  - DE
