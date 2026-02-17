@@ -1,6 +1,12 @@
 name: Build Windows Executable
 
 on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to attach the Windows zip (example: v0.0.1-alpha)
+        required: true
+        type: string
   release:
     types: [published]
 
@@ -39,7 +45,11 @@ jobs:
           Copy-Item dist/CWKeyTrainer.exe package/
           if (Test-Path config.yaml) { Copy-Item config.yaml package/ }
           if (Test-Path README.md) { Copy-Item README.md package/ }
-          $tag = "${{ github.event.release.tag_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.release_tag }}"
+          } else {
+            $tag = "${{ github.event.release.tag_name }}"
+          }
           Compress-Archive -Path package\* -DestinationPath "CWKeyTrainer-windows-$tag.zip" -Force
 
       - name: Upload workflow artifact
@@ -48,8 +58,17 @@ jobs:
           name: CWKeyTrainer-windows
           path: CWKeyTrainer-windows-*.zip
 
-      - name: Upload asset to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name }}
-          files: CWKeyTrainer-windows-*.zip
+      - name: Upload asset to existing GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh --version
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.release_tag }}"
+          } else {
+            $tag = "${{ github.event.release.tag_name }}"
+          }
+          Get-ChildItem CWKeyTrainer-windows-*.zip | ForEach-Object {
+            gh release upload $tag $_.FullName --clobber
+          }
