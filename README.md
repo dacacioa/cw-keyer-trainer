@@ -26,6 +26,7 @@ Aplicacion multiplataforma (Windows/macOS/Linux, Python 3.11+) para practicar QS
 
 ```bash
 git clone https://github.com/dacacioa/cw-keyer-trainer.git
+cd cw-keyer-trainer
 python -m venv .venv
 # Windows
 .venv\Scripts\activate
