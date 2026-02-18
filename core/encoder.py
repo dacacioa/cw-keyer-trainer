@@ -21,6 +21,10 @@ class CWEncoderConfig:
     sample_rate: int = 48000
     tone_hz: float = 650.0
     wpm: float = 20.0
+    wpm_out_start: float = 20.0
+    wpm_out_end: float = 20.0
+    tone_hz_out_start: float = 650.0
+    tone_hz_out_end: float = 650.0
     farnsworth_wpm: Optional[float] = None
     volume: float = 0.25
     attack_ms: float = 4.0

@@ -78,14 +78,15 @@ Notas de UI recientes:
 
 Controles runtime:
 
-- `Reset`
+- `Run`
+- `Pause`
+- `Stop`
 - `Restart QSO`
 - `Calibrate`
 - `Export Log`
 - `Load Calls File` (guarda copia local en `data/other_calls.csv`)
 - `Auto WPM`
 - `Auto Tone`
-- `Require K1`
 - Seleccion `Input`/`Output`
 
 Parametros en settings:
@@ -93,11 +94,12 @@ Parametros en settings:
 - `my_call`
 - `cq_mode` (`Simple` / `POTA` / `SOTA`, exclusivo)
 - `prosign` + `Use Prosigns`
-- `wpm_target` (RX) y `wpm_out` (TX de la otra estacion)
-- `tone_hz_rx` y `tone_hz_out`
+- `wpm_target` (RX), `wpm_out_start` y `wpm_out_end` (TX aleatorio por QSO)
+- `tone_hz_rx`, `tone_hz_out_start` y `tone_hz_out_end` (TX aleatorio por QSO)
 - `threshold_on`, `threshold_off`
 - `power_smooth`, `gap_char_dots`, `min_up_ratio`
 - `message_gap_s`
+- `max_stations` (cantidad maxima de estaciones en cola tras cada CQ)
 - `incoming_call_%` (`0/25/50/75/100`)
 - `allow_599`, `allow_tu`
 
@@ -140,30 +142,21 @@ Comportamiento:
 ### Modo directo (por defecto)
 
 1. CQ segun `qso.cq_mode`:
-   - `POTA`: `CQ CQ POTA DE {my_call} {my_call} K` (o `K1` con `require_k1=true`)
-   - `SOTA`: `CQ CQ SOTA DE {my_call} {my_call} K` (o `K1`)
-   - `SIMPLE`: `CQ CQ {my_call} {my_call} K` (o `K1`)
-2. App TX: `{other_call} {other_call}`
-3. Usuario: `{other_call} 5NN 5NN` (acepta `599` si `allow_599=true`)
+   - `POTA`: `CQ CQ POTA DE {my_call} {my_call} K`
+   - `SOTA`: `CQ CQ SOTA DE {my_call} {my_call} K`
+   - `SIMPLE`: `CQ CQ {my_call} {my_call} K`
+2. App TX: llama entre `1..max_stations` estaciones (aleatorias del pool), cada una con delay aleatorio `0..2s`.
+3. Usuario: selecciona una estacion por indicativo exacto y envia reporte (`{other_call} 5NN 5NN`).
 4. App TX: `{prosign_literal} UR 5NN 5NN TU 73 {prosign_literal}` (sin `my_call`)
 5. Usuario: `73 EE`
-6. App TX: `EE`, se registra QSO y vuelve a `S0`.
-7. Si esta activo auto-incoming, puede entrar nueva estacion segun `incoming_call_%` y se salta CQ.
-
-### Modo legado (`--legacy-flow`)
-
-1. CQ segun `qso.cq_mode`
-2. App TX: `{other_call} {other_call}`
-3. Usuario: `{other_call}` (1-2 veces)
-4. Usuario: `{other_call} UR 5NN 5NN <CAVE>` (si `use_prosigns=true`)
-5. App TX: `RR UR 5NN 5NN <CAVE>` (o `R ...`)
-6. Usuario: `<CAVE> 73 EE` (o `73 EE` si `use_prosigns=false`)
-7. App TX: `EE`, se registra QSO y vuelve a `S0`.
+6. App TX: `EE` y, si quedan estaciones pendientes, vuelven a llamar ignorando `incoming_call_%`.
+7. Solo cuando no hay pendientes se aplica `incoming_call_%` para meter una nueva estacion automaticamente.
 
 Comportamiento en `S2`:
 
-- `?` o parcial con `?` (ej. `K2?`) => repite indicativo (`other_call other_call`) y sigue en `S2`.
-- Indicativo completo terminado en `?` (ej. `K2LYV?`) => responde `RR` y continua flujo.
+- Indicativo completo con `?` (ej. `EA3IMR?`) => selecciona esa estacion y responde `RR`.
+- Parcial con `?` (ej. `EA3?`, `EA?`) => responden solo las estaciones en cola que coinciden.
+- Si no hay coincidencias para el patron, no responde ninguna estacion.
 
 ## Modo simulacion (sin audio) 🧪
 
@@ -174,7 +167,6 @@ python -m app --simulate
 Comandos:
 
 - `/reset`
-- `/k1`
 - `/export`
 - `/quit`
 
@@ -185,12 +177,13 @@ Comandos:
 - `--cq-mode SIMPLE|POTA|SOTA`
 - `--other-calls-file`
 - `--wpm-target`, `--wpm-out`
+- `--wpm-out-start`, `--wpm-out-end`
 - `--tone-hz`, `--tone-out-hz`
+- `--tone-out-start-hz`, `--tone-out-end-hz`
 - `--message-gap-sec`
 - `--auto-wpm`, `--fixed-wpm`
 - `--auto-tone`, `--fixed-tone`
-- `--direct-flow`, `--legacy-flow`
-- `--require-k1`
+- `--max-stations`
 - `--allow-599`
 - `--allow-tu`
 - `--disable-prosigns`
@@ -219,11 +212,12 @@ Comportamiento:
 
 - Se ejecuta al publicar una Release (`release: published`).
 - Ejecuta tests.
-- Construye `CWKeyTrainer.exe` con PyInstaller.
+- Construye paquete `onedir` con PyInstaller (arranque mas rapido que `onefile`).
 - Genera ZIP: `CWKeyTrainer-windows-<tag>.zip`.
 - Sube el ZIP como:
   - artifact del workflow
   - asset de la Release
+- Dentro del ZIP, ejecuta `CWKeyTrainer\CWKeyTrainer.exe`.
 - Descarga siempre la ultima version desde la `latest release`:
   - URL: `https://github.com/<owner>/<repo>/releases/latest`
   - Ahí encontraras el asset `CWKeyTrainer-windows-<tag>.zip`.
@@ -237,4 +231,4 @@ python -m pytest -q
 Incluye:
 
 - Roundtrip encoder->decoder sintetico (15/20/25 WPM) con precision >95%.
-- Validaciones de maquina de estados (CQ, doble indicativo, `K1`, flujo directo/legado, casos con `?`).
+- Validaciones de maquina de estados (CQ, cola de estaciones, seleccion por indicativo y casos con `?`).

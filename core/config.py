@@ -40,8 +40,41 @@ def load_config(path: str | Path) -> AppConfig:
 
     _apply_dataclass_updates(cfg.audio, raw.get("audio", {}))
     _apply_dataclass_updates(cfg.decoder, raw.get("decoder", {}))
-    _apply_dataclass_updates(cfg.encoder, raw.get("encoder", {}))
+    encoder_raw = raw.get("encoder", {})
+    _apply_dataclass_updates(cfg.encoder, encoder_raw)
     _apply_dataclass_updates(cfg.qso, raw.get("qso", {}))
+    cfg.qso.max_stations = max(1, int(cfg.qso.max_stations))
+
+    # Backward compatibility: old configs only had fixed wpm/tone_hz.
+    has_wpm_start = "wpm_out_start" in encoder_raw
+    has_wpm_end = "wpm_out_end" in encoder_raw
+    if not has_wpm_start and not has_wpm_end:
+        cfg.encoder.wpm_out_start = cfg.encoder.wpm
+        cfg.encoder.wpm_out_end = cfg.encoder.wpm
+    elif not has_wpm_start:
+        cfg.encoder.wpm_out_start = cfg.encoder.wpm_out_end
+    elif not has_wpm_end:
+        cfg.encoder.wpm_out_end = cfg.encoder.wpm_out_start
+    if cfg.encoder.wpm_out_start > cfg.encoder.wpm_out_end:
+        cfg.encoder.wpm_out_start, cfg.encoder.wpm_out_end = (
+            cfg.encoder.wpm_out_end,
+            cfg.encoder.wpm_out_start,
+        )
+
+    has_tone_start = "tone_hz_out_start" in encoder_raw
+    has_tone_end = "tone_hz_out_end" in encoder_raw
+    if not has_tone_start and not has_tone_end:
+        cfg.encoder.tone_hz_out_start = cfg.encoder.tone_hz
+        cfg.encoder.tone_hz_out_end = cfg.encoder.tone_hz
+    elif not has_tone_start:
+        cfg.encoder.tone_hz_out_start = cfg.encoder.tone_hz_out_end
+    elif not has_tone_end:
+        cfg.encoder.tone_hz_out_end = cfg.encoder.tone_hz_out_start
+    if cfg.encoder.tone_hz_out_start > cfg.encoder.tone_hz_out_end:
+        cfg.encoder.tone_hz_out_start, cfg.encoder.tone_hz_out_end = (
+            cfg.encoder.tone_hz_out_end,
+            cfg.encoder.tone_hz_out_start,
+        )
 
     # Keep sample rates aligned unless explicitly diverging in YAML.
     if "sample_rate" not in raw.get("decoder", {}):

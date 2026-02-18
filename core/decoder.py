@@ -118,6 +118,32 @@ class CWDecoder:
         self._down_durations.clear()
         self._up_durations.clear()
 
+    def calibrate_noise_floor_from_samples(self, samples: np.ndarray, *, percentile: float = 75.0) -> float:
+        mono = _to_mono_float32(samples)
+        if mono.size < self.frame_len:
+            raise ValueError("Not enough audio samples for noise calibration.")
+
+        # During calibration we only estimate the baseline tone power at the current RX tone.
+        # A percentile (instead of max) is more robust to short transients.
+        p = float(np.clip(percentile, 5.0, 95.0))
+        powers: List[float] = []
+        for i in range(0, mono.size - self.frame_len + 1, self.frame_len):
+            frame = mono[i : i + self.frame_len]
+            powers.append(_goertzel_power(frame, self.config.sample_rate, self._tone_hz))
+
+        if not powers:
+            raise ValueError("No complete frames available for noise calibration.")
+
+        floor = float(max(np.percentile(np.asarray(powers, dtype=np.float32), p), 1e-12))
+        self._noise_floor = floor
+        self._tone_power_smooth = floor
+        self.stats.tone_hz = self._tone_hz
+        self.stats.tone_power = floor
+        self.stats.noise_floor = floor
+        self.stats.threshold_on = max(floor * self.config.threshold_on_mult, 1e-12)
+        self.stats.threshold_off = max(floor * self.config.threshold_off_mult, 1e-12)
+        return floor
+
     def process_samples(self, samples: np.ndarray) -> List[str]:
         if samples.size == 0:
             return []

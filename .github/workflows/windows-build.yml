@@ -35,14 +35,14 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
-      - name: Build EXE with PyInstaller
-        run: pyinstaller --noconfirm --clean --onefile --windowed --name CWKeyTrainer --collect-all PySide6 --hidden-import sounddevice app.py
+      - name: Build EXE with PyInstaller (onedir for faster startup)
+        run: pyinstaller --noconfirm --clean --onedir --windowed --name CWKeyTrainer --collect-all PySide6 --hidden-import sounddevice app.py
 
       - name: Package output
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path package | Out-Null
-          Copy-Item dist/CWKeyTrainer.exe package/
+          Copy-Item dist/CWKeyTrainer package/ -Recurse
           if (Test-Path config.yaml) { Copy-Item config.yaml package/ }
           if (Test-Path README.md) { Copy-Item README.md package/ }
           if ("${{ github.event_name }}" -eq "workflow_dispatch") {

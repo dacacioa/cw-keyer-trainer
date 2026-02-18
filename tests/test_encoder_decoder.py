@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 
+import numpy as np
+
 from core.decoder import CWDecoder, CWDecoderConfig
 from core.encoder import CWEncoder, CWEncoderConfig
 
@@ -88,3 +90,24 @@ def test_configured_prosign_token_is_sent_contiguous():
     dot = enc.config.dot_seconds
     off_durations = [dur for is_on, dur in pulses if not is_on]
     assert not any(abs(d - (3.0 * dot)) < 0.2 * dot for d in off_durations)
+
+
+def test_noise_floor_calibration_from_samples_updates_thresholds():
+    cfg = CWDecoderConfig(
+        sample_rate=16000,
+        frame_ms=10.0,
+        target_tone_hz=700.0,
+        auto_tone=False,
+        threshold_on_mult=4.0,
+        threshold_off_mult=2.4,
+        auto_wpm=False,
+    )
+    dec = CWDecoder(cfg)
+    rng = np.random.default_rng(12345)
+    noise = rng.normal(0.0, 0.02, int(cfg.sample_rate * 2.0)).astype(np.float32)
+    floor = dec.calibrate_noise_floor_from_samples(noise, percentile=75.0)
+
+    assert floor > 1e-12
+    assert dec.stats.noise_floor == floor
+    assert dec.stats.threshold_on == max(floor * cfg.threshold_on_mult, 1e-12)
+    assert dec.stats.threshold_off == max(floor * cfg.threshold_off_mult, 1e-12)

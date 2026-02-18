@@ -1,7 +1,7 @@
 audio:
   sample_rate: 48000
   input_device: 3
-  output_device: 10
+  output_device: 9
   blocksize: 1024
   channels: 1
 decoder:
@@ -31,8 +31,12 @@ decoder:
   prosign_literal: BK
 encoder:
   sample_rate: 48000
-  tone_hz: 550.0
-  wpm: 19.0
+  tone_hz: 595.0
+  wpm: 24.9
+  wpm_out_start: 18.0
+  wpm_out_end: 25.0
+  tone_hz_out_start: 575.0
+  tone_hz_out_end: 625.0
   farnsworth_wpm: null
   volume: 0.25
   attack_ms: 4.0
@@ -43,13 +47,12 @@ qso:
   my_call: EA3IPX
   other_call: N1MM
   cq_mode: SIMPLE
+  max_stations: 2
   other_calls_file: data\other_calls.csv
   auto_incoming_after_qso: true
   auto_incoming_probability: 0.5
-  require_k1: false
   allow_599: false
   allow_tu: false
-  direct_report_mode: true
   use_prosigns: true
   prosign_literal: BK
   s4_prefix: RR
