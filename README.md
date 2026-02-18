@@ -1,4 +1,4 @@
-# CW Key trainer 🔑📻
+# CW Key trainer 📻
 
 Aplicacion multiplataforma (Windows/macOS/Linux, Python 3.11+) para practicar QSOs CW con audio real (llave + oscilador/micro/line-in/virtual cable), validacion por estados y respuesta automatica en Morse.
 
@@ -25,6 +25,7 @@ Aplicacion multiplataforma (Windows/macOS/Linux, Python 3.11+) para practicar QS
 ## Instalacion 🛠️
 
 ```bash
+git clone https://github.com/dacacioa/cw-keyer-trainer.git
 python -m venv .venv
 # Windows
 .venv\Scripts\activate
