@@ -32,8 +32,8 @@ decoder:
   prosign_literal: BK
 encoder:
   sample_rate: 48000
-  tone_hz: 575.0
-  wpm: 18.0
+  tone_hz: 595.8
+  wpm: 20.3
   wpm_out_start: 18.0
   wpm_out_end: 25.0
   tone_hz_out_start: 575.0
