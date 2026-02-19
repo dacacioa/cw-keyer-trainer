@@ -5,6 +5,7 @@ Aplicacion multiplataforma (Windows/macOS/Linux, Python 3.11+) para practicar QS
 ## Caracteristicas ✨
 
 - Captura de audio en tiempo real desde dispositivo seleccionable.
+- Selector de entrada `Audio` o `Keyboard`.
 - Deteccion de tono CW (Goertzel + auto-tone opcional).
 - Decodificacion Morse a texto con histeresis, AGC basico y estimacion de WPM.
 - Maquina de estados de QSO con validaciones y mensajes de error claros.
@@ -80,6 +81,7 @@ Notas de UI recientes:
 
 Controles runtime:
 
+- `Mode` (`Audio` / `Keyboard`)
 - `Run`
 - `Pause`
 - `Stop`
@@ -90,6 +92,24 @@ Controles runtime:
 - `Auto WPM`
 - `Auto Tone`
 - Seleccion `Input`/`Output`
+
+Modo `Keyboard`:
+
+- `Ctrl` izquierda = `dit` (punto), `Ctrl` derecha = `dah` (raya).
+- Keyer iambico `A` (doble paleta) con repeticion continua al mantener paleta.
+- La velocidad usa `wpm_target`.
+- Se inyecta audio interno al decoder (sin `input_device`).
+- Se emite sidetone por `output` con `tone_hz_rx` y volumen `encoder.volume`.
+- El keying solo actua con la ventana enfocada y runtime en `RUNNING`.
+- En este modo no aplican `Input`, `Auto Tone` ni `Calibrate Noise`.
+- El sidetone se mezcla con el TX automatico de la app.
+
+Uso rapido de `Keyboard`:
+
+1. Selecciona `Mode = Keyboard`.
+2. Ajusta `wpm_target` y `tone_hz_rx`.
+3. Pulsa `Apply Settings` y luego `Run`.
+4. Manipula con `Ctrl` izquierda/derecha (iambico A).
 
 Parametros en settings:
 
@@ -174,6 +194,7 @@ Comandos:
 
 ## CLI relevante ⌨️
 
+- `--input-mode audio|keyboard`
 - `--my-call`
 - `--other-call` (fallback cuando no hay pool dinamico)
 - `--cq-mode SIMPLE|POTA|SOTA`

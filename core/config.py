@@ -18,6 +18,7 @@ class AudioRuntimeConfig:
     output_device: Optional[int] = None
     blocksize: int = 1024
     channels: int = 1
+    input_mode: str = "audio"  # audio | keyboard
 
 
 @dataclass
@@ -81,6 +82,9 @@ def load_config(path: str | Path) -> AppConfig:
         cfg.decoder.sample_rate = cfg.audio.sample_rate
     if "sample_rate" not in raw.get("encoder", {}):
         cfg.encoder.sample_rate = cfg.audio.sample_rate
+
+    mode = str(cfg.audio.input_mode or "audio").strip().lower()
+    cfg.audio.input_mode = mode if mode in {"audio", "keyboard"} else "audio"
 
     return cfg
 

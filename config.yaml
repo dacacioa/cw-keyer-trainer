@@ -4,6 +4,7 @@ audio:
   output_device: 9
   blocksize: 1024
   channels: 1
+  input_mode: keyboard
 decoder:
   sample_rate: 48000
   frame_ms: 10.0
@@ -15,7 +16,7 @@ decoder:
   threshold_off_mult: 2.4
   agc_alpha: 0.03
   power_smooth_alpha: 1.0
-  wpm_target: 23.0
+  wpm_target: 24.0
   auto_wpm: false
   dot_ms_min: 25.0
   dot_ms_max: 220.0
@@ -31,8 +32,8 @@ decoder:
   prosign_literal: BK
 encoder:
   sample_rate: 48000
-  tone_hz: 595.0
-  wpm: 24.9
+  tone_hz: 575.0
+  wpm: 18.0
   wpm_out_start: 18.0
   wpm_out_end: 25.0
   tone_hz_out_start: 575.0

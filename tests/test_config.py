@@ -49,3 +49,26 @@ encoder:
     assert cfg.encoder.wpm_out_end == 35.0
     assert cfg.encoder.tone_hz_out_start == 500.0
     assert cfg.encoder.tone_hz_out_end == 900.0
+
+
+def test_load_config_normalizes_input_mode(tmp_path: Path):
+    cfg_path = tmp_path / "config.yaml"
+    _write_yaml(
+        cfg_path,
+        """
+audio:
+  input_mode: KEYBOARD
+""".strip(),
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.audio.input_mode == "keyboard"
+
+    _write_yaml(
+        cfg_path,
+        """
+audio:
+  input_mode: invalid
+""".strip(),
+    )
+    cfg2 = load_config(cfg_path)
+    assert cfg2.audio.input_mode == "audio"

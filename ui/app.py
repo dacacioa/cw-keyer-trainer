@@ -9,10 +9,10 @@ import sys
 import threading
 import time
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Deque, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -23,6 +23,7 @@ from core.config import AppConfig, load_config, save_config
 from core.callsign_pool import load_callsigns_file
 from core.decoder import CWDecoder
 from core.encoder import CWEncoder
+from core.iambic_keyer import IambicAKeyer, IambicAKeyerConfig
 from core.qso_state_machine import QSOStateMachine
 
 try:
@@ -31,9 +32,10 @@ except Exception:  # pragma: no cover - optional runtime dependency
     sd = None
 
 try:
-    from PySide6 import QtCore, QtWidgets
+    from PySide6 import QtCore, QtGui, QtWidgets
 except Exception:  # pragma: no cover - optional runtime dependency
     QtCore = None
+    QtGui = None
     QtWidgets = None
 
 if QtWidgets is not None:
@@ -45,6 +47,21 @@ else:  # pragma: no cover - fallback for non-GUI modes
 
 LOCAL_CALLS_DIR = Path("data")
 LOCAL_CALLS_FILENAME = "other_calls.csv"
+UI_TIMER_MS = 20
+KEYBOARD_TIMER_MS = 5
+LEFT_CTRL_NATIVE_VKEYS = {0xA2}
+RIGHT_CTRL_NATIVE_VKEYS = {0xA3}
+LEFT_CTRL_NATIVE_SCANCODES = {29, 37}
+RIGHT_CTRL_NATIVE_SCANCODES = {97, 105, 285, 3613}
+if sys.platform.startswith("win"):
+    try:
+        import ctypes
+
+        _WIN_USER32 = ctypes.windll.user32
+    except Exception:
+        _WIN_USER32 = None
+else:
+    _WIN_USER32 = None
 
 
 class AudioInputWorker:
@@ -101,13 +118,24 @@ class AudioInputWorker:
                 pass
 
 
+@dataclass
+class _ScheduledAudioTrack:
+    audio: np.ndarray
+    pos: int = 0
+    delay_samples: int = 0
+    source: str = "tx"
+
+
 class AudioOutputWorker:
-    def __init__(self, encoder: CWEncoder, device: Optional[int]):
+    def __init__(self, encoder: CWEncoder, device: Optional[int], blocksize: int = 1024):
         self.encoder = encoder
         self.device = device
-        self.queue: queue.Queue[object] = queue.Queue(maxsize=128)
+        self.blocksize = int(np.clip(int(blocksize), 128, 256))
+        self.queue: queue.Queue[object] = queue.Queue(maxsize=512)
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
+        self._provider_lock = threading.Lock()
+        self._live_sidetone_provider: Optional[Callable[[int], np.ndarray]] = None
 
     def start(self) -> None:
         if not self.thread.is_alive():
@@ -116,14 +144,25 @@ class AudioOutputWorker:
     def stop(self) -> None:
         self.stop_event.set()
         try:
-            self.queue.put_nowait("__STOP__")
+            self.queue.put_nowait(("stop",))
         except queue.Full:
             pass
         if self.thread.is_alive():
-            self.thread.join(timeout=1.5)
+            self.thread.join(timeout=2.0)
 
     def set_device(self, device: Optional[int]) -> None:
         self.device = device
+        try:
+            self.queue.put_nowait(("set_device", device))
+        except queue.Full:
+            pass
+
+    def set_live_sidetone_provider(
+        self,
+        provider: Optional[Callable[[int], np.ndarray]],
+    ) -> None:
+        with self._provider_lock:
+            self._live_sidetone_provider = provider
 
     def enqueue(
         self,
@@ -141,9 +180,18 @@ class AudioOutputWorker:
     def enqueue_audio(self, audio: np.ndarray, *, delay_sec: float = 0.0) -> None:
         if audio.size == 0:
             return
-        payload = audio.astype(np.float32, copy=False)
+        payload = np.asarray(audio, dtype=np.float32)
         try:
             self.queue.put_nowait(("audio", payload, max(0.0, float(delay_sec))))
+        except queue.Full:
+            pass
+
+    def enqueue_sidetone(self, audio: np.ndarray) -> None:
+        if audio.size == 0:
+            return
+        payload = np.asarray(audio, dtype=np.float32)
+        try:
+            self.queue.put_nowait(("sidetone", payload))
         except queue.Full:
             pass
 
@@ -153,41 +201,312 @@ class AudioOutputWorker:
                 self.queue.get_nowait()
             except queue.Empty:
                 break
+        try:
+            self.queue.put_nowait(("clear",))
+        except queue.Full:
+            pass
 
-    def _run(self) -> None:
-        while not self.stop_event.is_set():
-            try:
-                item = self.queue.get(timeout=0.2)
-            except queue.Empty:
+    def _render_text(self, text: str, wpm: Optional[float], tone_hz: Optional[float]) -> np.ndarray:
+        cfg = replace(self.encoder.config)
+        if wpm is not None:
+            cfg.wpm = float(wpm)
+        if tone_hz is not None:
+            cfg.tone_hz = float(tone_hz)
+        return CWEncoder(cfg).encode_to_audio(text)
+
+    def _open_stream(self, device: Optional[int], callback=None):
+        if sd is None:
+            return None
+        try:
+            kwargs = {
+                "samplerate": self.encoder.config.sample_rate,
+                "blocksize": self.blocksize,
+                "channels": 1,
+                "device": device,
+                "dtype": "float32",
+                "latency": "low",
+            }
+            if callback is not None:
+                kwargs["callback"] = callback
+            stream = sd.OutputStream(**kwargs)
+            stream.start()
+            return stream
+        except Exception:
+            return None
+
+    def _schedule_audio(
+        self,
+        tracks: List[_ScheduledAudioTrack],
+        audio: np.ndarray,
+        delay_sec: float,
+        *,
+        source: str = "tx",
+    ) -> None:
+        delay_samples = max(int(round(max(0.0, float(delay_sec)) * self.encoder.config.sample_rate)), 0)
+        tracks.append(
+            _ScheduledAudioTrack(
+                audio=np.asarray(audio, dtype=np.float32),
+                delay_samples=delay_samples,
+                source=source,
+            )
+        )
+
+    def _clear_sidetone_state(self, sidetone_state: Dict[str, object]) -> None:
+        chunks = sidetone_state.get("chunks")
+        if isinstance(chunks, deque):
+            chunks.clear()
+        sidetone_state["offset"] = 0
+        sidetone_state["pending"] = 0
+
+    def _append_sidetone_chunk(self, sidetone_state: Dict[str, object], audio: np.ndarray) -> None:
+        chunk = np.asarray(audio, dtype=np.float32)
+        if chunk.size == 0:
+            return
+        chunks_obj = sidetone_state.get("chunks")
+        if not isinstance(chunks_obj, deque):
+            chunks_obj = deque()
+            sidetone_state["chunks"] = chunks_obj
+        chunks: Deque[np.ndarray] = chunks_obj
+
+        chunks.append(chunk)
+        pending = int(sidetone_state.get("pending", 0)) + int(chunk.size)
+        offset = int(sidetone_state.get("offset", 0))
+        max_pending = int(0.12 * max(self.encoder.config.sample_rate, 1))
+
+        while pending > max_pending and chunks:
+            head = chunks[0]
+            if offset > 0:
+                drop = min(offset, int(head.size))
+                offset -= drop
+                pending -= drop
+                if drop < int(head.size):
+                    chunks[0] = head[drop:]
+                    break
+                chunks.popleft()
+                offset = 0
                 continue
-            if item == "__STOP__":
+            pending -= int(head.size)
+            chunks.popleft()
+
+        sidetone_state["offset"] = max(offset, 0)
+        sidetone_state["pending"] = max(pending, 0)
+
+    def _consume_sidetone_block(self, sidetone_state: Dict[str, object], n: int) -> np.ndarray:
+        out = np.zeros(max(int(n), 0), dtype=np.float32)
+        if out.size == 0:
+            return out
+        chunks_obj = sidetone_state.get("chunks")
+        if not isinstance(chunks_obj, deque) or not chunks_obj:
+            sidetone_state["offset"] = 0
+            sidetone_state["pending"] = 0
+            return out
+
+        chunks: Deque[np.ndarray] = chunks_obj
+        offset = int(max(0, sidetone_state.get("offset", 0)))
+        pending = int(max(0, sidetone_state.get("pending", 0)))
+        pos = 0
+
+        while pos < out.size and chunks:
+            head = chunks[0]
+            if offset >= int(head.size):
+                chunks.popleft()
+                offset = 0
+                continue
+            avail = int(head.size) - offset
+            take = min(avail, out.size - pos)
+            if take <= 0:
                 break
-            if sd is None:
-                continue
+            out[pos : pos + take] = head[offset : offset + take]
+            pos += take
+            offset += take
+            pending -= take
+            if offset >= int(head.size):
+                chunks.popleft()
+                offset = 0
+
+        sidetone_state["offset"] = max(offset, 0)
+        sidetone_state["pending"] = max(pending, 0)
+        return out
+
+    def _process_commands(
+        self,
+        tracks: List[_ScheduledAudioTrack],
+        device_holder: Dict[str, Optional[int]],
+        sidetone_state: Dict[str, object],
+        state_lock: threading.Lock,
+    ) -> bool:
+        restart_stream = False
+        while True:
+            try:
+                item = self.queue.get_nowait()
+            except queue.Empty:
+                break
             if not isinstance(item, tuple) or not item:
                 continue
-            kind = item[0]
+            kind = str(item[0])
+            if kind == "stop":
+                self.stop_event.set()
+                break
+            if kind == "set_device":
+                if len(item) == 2:
+                    device_holder["device"] = item[1]
+                    restart_stream = True
+                continue
+            if kind == "clear":
+                with state_lock:
+                    tracks.clear()
+                    self._clear_sidetone_state(sidetone_state)
+                continue
             if kind == "text":
                 if len(item) != 5:
                     continue
                 _kind, text, wpm, tone_hz, delay_sec = item
-                if delay_sec > 0.0:
-                    time.sleep(delay_sec)
-                if wpm is not None:
-                    self.encoder.config.wpm = float(wpm)
-                if tone_hz is not None:
-                    self.encoder.config.tone_hz = float(tone_hz)
-                audio = self.encoder.encode_to_audio(text)
-            elif kind == "audio":
+                try:
+                    audio = self._render_text(str(text), wpm, tone_hz)
+                except Exception:
+                    continue
+                with state_lock:
+                    self._schedule_audio(tracks, audio, float(delay_sec), source="tx")
+                continue
+            if kind == "audio":
                 if len(item) != 3:
                     continue
                 _kind, audio, delay_sec = item
-                if delay_sec > 0.0:
-                    time.sleep(delay_sec)
-            else:
+                with state_lock:
+                    self._schedule_audio(
+                        tracks,
+                        np.asarray(audio, dtype=np.float32),
+                        float(delay_sec),
+                        source="tx",
+                    )
                 continue
+            if kind == "sidetone":
+                if len(item) != 2:
+                    continue
+                _kind, audio = item
+                with state_lock:
+                    self._append_sidetone_chunk(sidetone_state, np.asarray(audio, dtype=np.float32))
+        return restart_stream
+
+    def _mix_next_block(
+        self,
+        tracks: List[_ScheduledAudioTrack],
+        sidetone_state: Dict[str, object],
+        n: int,
+    ) -> np.ndarray:
+        n = max(int(n), 1)
+        mix = np.zeros(n, dtype=np.float32)
+        alive: List[_ScheduledAudioTrack] = []
+        for track in tracks:
+            if track.delay_samples >= n:
+                track.delay_samples -= n
+                alive.append(track)
+                continue
+
+            start = max(track.delay_samples, 0)
+            track.delay_samples = 0
+            remaining_track = track.audio.size - track.pos
+            if remaining_track <= 0:
+                continue
+            room = n - start
+            if room <= 0:
+                alive.append(track)
+                continue
+            take = min(remaining_track, room)
+            if take > 0:
+                mix[start : start + take] += track.audio[track.pos : track.pos + take]
+                track.pos += take
+            if track.pos < track.audio.size:
+                alive.append(track)
+        tracks[:] = alive
+        mix += self._consume_sidetone_block(sidetone_state, n)
+
+        peak = float(np.max(np.abs(mix))) if mix.size else 0.0
+        if peak > 1.0:
+            mix = np.tanh(mix).astype(np.float32, copy=False)
+        return mix
+
+    def _run(self) -> None:
+        tracks: List[_ScheduledAudioTrack] = []
+        device_holder: Dict[str, Optional[int]] = {"device": self.device}
+        sidetone_state: Dict[str, object] = {
+            "chunks": deque(),
+            "offset": 0,
+            "pending": 0,
+        }
+        state_lock = threading.Lock()
+        stream_status = {"last": ""}
+
+        def _callback(_outdata, _frames, _time_info, status) -> None:
+            if status:
+                stream_status["last"] = str(status)
+
+        def _audio_callback(outdata, frames, _time_info, status) -> None:
+            if status:
+                stream_status["last"] = str(status)
+            with state_lock:
+                block = self._mix_next_block(tracks, sidetone_state, frames)
+            provider: Optional[Callable[[int], np.ndarray]]
+            with self._provider_lock:
+                provider = self._live_sidetone_provider
+            if provider is not None:
+                try:
+                    sidetone = np.asarray(provider(int(frames)), dtype=np.float32)
+                except Exception:
+                    sidetone = np.zeros(int(frames), dtype=np.float32)
+                if sidetone.size < int(frames):
+                    padded = np.zeros(int(frames), dtype=np.float32)
+                    padded[: sidetone.size] = sidetone
+                    sidetone = padded
+                elif sidetone.size > int(frames):
+                    sidetone = sidetone[: int(frames)]
+                block = block + sidetone
+            peak = float(np.max(np.abs(block))) if block.size else 0.0
+            if peak > 1.0:
+                block = np.tanh(block).astype(np.float32, copy=False)
+            outdata[:, 0] = block
+
+        stream = self._open_stream(device_holder["device"], callback=_audio_callback if sd is not None else _callback)
+
+        while not self.stop_event.is_set():
+            if self._process_commands(tracks, device_holder, sidetone_state, state_lock):
+                if stream is not None:
+                    try:
+                        stream.stop()
+                        stream.close()
+                    except Exception:
+                        pass
+                stream = self._open_stream(
+                    device_holder["device"],
+                    callback=_audio_callback if sd is not None else _callback,
+                )
+
+            if self.stop_event.is_set():
+                break
+
+            if sd is None:
+                with state_lock:
+                    tracks.clear()
+                    self._clear_sidetone_state(sidetone_state)
+                time.sleep(0.05)
+                continue
+            if stream is None:
+                stream = self._open_stream(
+                    device_holder["device"],
+                    callback=_audio_callback if sd is not None else _callback,
+                )
+                if stream is None:
+                    time.sleep(0.05)
+                    continue
+
+            if stream_status["last"]:
+                stream_status["last"] = ""
+            time.sleep(0.002)
+
+        if stream is not None:
             try:
-                sd.play(audio, samplerate=self.encoder.config.sample_rate, device=self.device, blocking=True)
+                stream.stop()
+                stream.close()
             except Exception:
                 pass
 
@@ -334,6 +653,18 @@ class PotaTrainerWindow(MainWindowBase):
 
         self.decoder = CWDecoder(self.cfg.decoder)
         self.encoder = CWEncoder(self.cfg.encoder)
+        self.keyboard_keyer = IambicAKeyer(
+            IambicAKeyerConfig(
+                sample_rate=self.cfg.audio.sample_rate,
+                wpm=float(self.cfg.decoder.wpm_target),
+                tone_hz=float(self.cfg.decoder.target_tone_hz),
+                volume=float(self.cfg.encoder.volume),
+                attack_ms=float(np.clip(self.cfg.encoder.attack_ms, 0.5, 1.5)),
+                release_ms=float(np.clip(self.cfg.encoder.release_ms, 0.5, 1.5)),
+            )
+        )
+        self._keyboard_keyer_lock = threading.Lock()
+        self._keyboard_audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=256)
         self._sync_encoder_prosign_tokens()
         self.state_machine = QSOStateMachine(self.cfg.qso)
 
@@ -352,6 +683,9 @@ class PotaTrainerWindow(MainWindowBase):
         self.station_profiles: Dict[str, Tuple[float, float]] = {}
         self._applying_decoder_preset = False
         self._noise_calibrating = False
+        self._left_ctrl_down = False
+        self._right_ctrl_down = False
+        self._keyboard_last_tick_at: Optional[float] = None
 
         self._build_ui()
         self._populate_devices()
@@ -360,9 +694,17 @@ class PotaTrainerWindow(MainWindowBase):
         self._ensure_audio_pipeline()
 
         self.timer = QtCore.QTimer(self)
-        self.timer.setInterval(50)
+        self.timer.setInterval(UI_TIMER_MS)
+        self.timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
         self.timer.timeout.connect(self._on_timer)
         self.timer.start()
+        self.keyboard_timer = QtCore.QTimer(self)
+        self.keyboard_timer.setInterval(KEYBOARD_TIMER_MS)
+        self.keyboard_timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
+        self.keyboard_timer.timeout.connect(self._on_keyboard_timer)
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
         self.setWindowTitle("CW Key trainer")
         self.resize(1100, 760)
@@ -424,6 +766,9 @@ class PotaTrainerWindow(MainWindowBase):
 
         ctrl_box = QtWidgets.QGroupBox("Runtime Controls")
         ctrl_grid = QtWidgets.QGridLayout(ctrl_box)
+        self.input_mode_combo = QtWidgets.QComboBox()
+        self.input_mode_combo.addItem("Audio", "audio")
+        self.input_mode_combo.addItem("Keyboard", "keyboard")
         self.input_combo = QtWidgets.QComboBox()
         self.output_combo = QtWidgets.QComboBox()
         self.run_button = QtWidgets.QPushButton("Run")
@@ -445,8 +790,10 @@ class PotaTrainerWindow(MainWindowBase):
         self.calls_file_label = QtWidgets.QLabel("(none)")
         self.calls_file_label.setWordWrap(True)
         self.calls_pool_label = QtWidgets.QLabel("0")
-        ctrl_grid.addWidget(QtWidgets.QLabel("Input"), 0, 0)
-        ctrl_grid.addWidget(self.input_combo, 0, 1, 1, 5)
+        ctrl_grid.addWidget(QtWidgets.QLabel("Mode"), 0, 0)
+        ctrl_grid.addWidget(self.input_mode_combo, 0, 1)
+        ctrl_grid.addWidget(QtWidgets.QLabel("Input"), 0, 2)
+        ctrl_grid.addWidget(self.input_combo, 0, 3, 1, 3)
         ctrl_grid.addWidget(QtWidgets.QLabel("Output"), 1, 0)
         ctrl_grid.addWidget(self.output_combo, 1, 1, 1, 5)
         ctrl_grid.addWidget(self.auto_wpm_cb, 2, 0)
@@ -642,6 +989,7 @@ class PotaTrainerWindow(MainWindowBase):
         self.load_calls_file_button.clicked.connect(self._on_load_calls_file)
         self.auto_wpm_cb.toggled.connect(self._on_auto_wpm_toggled)
         self.auto_tone_cb.toggled.connect(self._on_auto_tone_toggled)
+        self.input_mode_combo.currentIndexChanged.connect(self._on_input_mode_changed)
         self.input_combo.currentIndexChanged.connect(self._on_input_changed)
         self.output_combo.currentIndexChanged.connect(self._on_output_changed)
         self.decoder_preset_slider.valueChanged.connect(self._on_decoder_preset_changed)
@@ -699,6 +1047,7 @@ class PotaTrainerWindow(MainWindowBase):
         self.auto_wpm_cb.setChecked(self.cfg.decoder.auto_wpm)
         self.auto_tone_cb.setChecked(self.cfg.decoder.auto_tone)
         self._sync_decoder_preset_widget()
+        self._set_combo_by_value(self.input_mode_combo, self.cfg.audio.input_mode)
         self._set_combo_by_device_id(self.input_combo, self.cfg.audio.input_device)
         self._set_combo_by_device_id(self.output_combo, self.cfg.audio.output_device)
         self._refresh_calls_file_status()
@@ -754,6 +1103,56 @@ class PotaTrainerWindow(MainWindowBase):
                 combo.setCurrentIndex(i)
                 return
         combo.setCurrentIndex(0)
+
+    def _current_input_mode(self) -> str:
+        mode = str(self.cfg.audio.input_mode or "audio").strip().lower()
+        return mode if mode in {"audio", "keyboard"} else "audio"
+
+    def _is_keyboard_mode(self) -> bool:
+        return self._current_input_mode() == "keyboard"
+
+    def _refresh_input_mode_controls(self) -> None:
+        keyboard_mode = self._is_keyboard_mode()
+        self.input_combo.setEnabled(not keyboard_mode)
+        self.auto_tone_cb.setEnabled(not keyboard_mode)
+        self.cal_button.setEnabled((not keyboard_mode) and (not self._noise_calibrating))
+
+    def _update_keyboard_timer(self) -> None:
+        should_run = (
+            self.runtime_state == self.RUNTIME_RUNNING
+            and self._is_keyboard_mode()
+            and (not self._noise_calibrating)
+        )
+        if should_run:
+            if not self.keyboard_timer.isActive():
+                self._keyboard_last_tick_at = None
+                self.keyboard_timer.start()
+            return
+        if self.keyboard_timer.isActive():
+            self.keyboard_timer.stop()
+        self._keyboard_last_tick_at = None
+
+    def _reset_keyboard_paddles(self, reset_keyer: bool = False) -> None:
+        self._left_ctrl_down = False
+        self._right_ctrl_down = False
+        with self._keyboard_keyer_lock:
+            self.keyboard_keyer.set_paddles(dit=False, dah=False)
+            if reset_keyer:
+                self.keyboard_keyer.reset()
+        self._clear_keyboard_audio_queue()
+        self._keyboard_last_tick_at = None
+
+    def _poll_ctrl_paddles(self) -> Tuple[bool, bool]:
+        if not self.isActiveWindow():
+            return False, False
+        if _WIN_USER32 is None:
+            return self._left_ctrl_down, self._right_ctrl_down
+        try:
+            left = bool(_WIN_USER32.GetAsyncKeyState(0xA2) & 0x8000)  # VK_LCONTROL
+            right = bool(_WIN_USER32.GetAsyncKeyState(0xA3) & 0x8000)  # VK_RCONTROL
+            return left, right
+        except Exception:
+            return self._left_ctrl_down, self._right_ctrl_down
 
     def _set_cq_mode_widget(self, mode: str) -> None:
         mode_u = (mode or "POTA").strip().upper()
@@ -884,19 +1283,26 @@ class PotaTrainerWindow(MainWindowBase):
                 channels=self.cfg.audio.channels,
             )
         if self.output_worker is None:
-            self.output_worker = AudioOutputWorker(self.encoder, self.cfg.audio.output_device)
+            self.output_worker = AudioOutputWorker(
+                self.encoder,
+                self.cfg.audio.output_device,
+                blocksize=self.cfg.audio.blocksize,
+            )
             self.output_worker.start()
         if self.output_worker:
             self.output_worker.set_device(self.cfg.audio.output_device)
+            self.output_worker.set_live_sidetone_provider(self._render_keyboard_sidetone_block)
 
     def _set_runtime_state(self, state: str) -> None:
         self.runtime_state = state
         self._update_runtime_controls()
+        self._update_keyboard_timer()
 
     def _update_runtime_controls(self) -> None:
         self.run_button.setEnabled(self.runtime_state != self.RUNTIME_RUNNING)
         self.pause_button.setEnabled(self.runtime_state == self.RUNTIME_RUNNING)
         self.stop_button.setEnabled(self.runtime_state != self.RUNTIME_STOPPED)
+        self._refresh_input_mode_controls()
 
     def _resume_elapsed_clock(self) -> None:
         if self.run_started_at is None:
@@ -934,13 +1340,42 @@ class PotaTrainerWindow(MainWindowBase):
             except queue.Empty:
                 break
 
+    def _clear_keyboard_audio_queue(self) -> None:
+        while True:
+            try:
+                self._keyboard_audio_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _render_keyboard_sidetone_block(self, frames: int) -> np.ndarray:
+        n = max(int(frames), 0)
+        if n <= 0:
+            return np.zeros(0, dtype=np.float32)
+        if self.runtime_state != self.RUNTIME_RUNNING or not self._is_keyboard_mode():
+            return np.zeros(n, dtype=np.float32)
+
+        with self._keyboard_keyer_lock:
+            chunk = self.keyboard_keyer.render_samples(n)
+        if chunk.size != n:
+            fixed = np.zeros(n, dtype=np.float32)
+            fixed[: min(chunk.size, n)] = chunk[: min(chunk.size, n)]
+            chunk = fixed
+
+        if chunk.size > 0:
+            try:
+                self._keyboard_audio_queue.put_nowait(chunk.copy())
+            except queue.Full:
+                try:
+                    self._keyboard_audio_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._keyboard_audio_queue.put_nowait(chunk.copy())
+                except queue.Full:
+                    pass
+        return chunk
+
     def _stop_audio_playback(self) -> None:
-        if sd is None:
-            return
-        try:
-            sd.stop()
-        except Exception:
-            pass
         if self.output_worker:
             self.output_worker.clear_pending()
 
@@ -966,27 +1401,58 @@ class PotaTrainerWindow(MainWindowBase):
             self._clear_input_queue()
 
     def _restart_input(self) -> None:
+        if self._is_keyboard_mode():
+            return
         if self.runtime_state != self.RUNTIME_RUNNING:
             return
         if self._start_listening():
             self._log("Input device restarted.")
 
+    def _process_keyboard_tick(self) -> None:
+        left_down, right_down = self._poll_ctrl_paddles()
+        if not self.isActiveWindow() and (self._left_ctrl_down or self._right_ctrl_down):
+            self._reset_keyboard_paddles(reset_keyer=False)
+            left_down, right_down = False, False
+        self._left_ctrl_down = left_down
+        self._right_ctrl_down = right_down
+        with self._keyboard_keyer_lock:
+            self.keyboard_keyer.set_paddles(dit=left_down, dah=right_down)
+
+        while True:
+            try:
+                chunk = self._keyboard_audio_queue.get_nowait()
+            except queue.Empty:
+                break
+            messages = self.decoder.process_samples(chunk)
+            for message in messages:
+                self._handle_decoded_message(message)
+
+    def _on_keyboard_timer(self) -> None:
+        if self._noise_calibrating:
+            return
+        if self.runtime_state != self.RUNTIME_RUNNING:
+            return
+        if not self._is_keyboard_mode():
+            return
+        self._process_keyboard_tick()
+
     def _on_timer(self) -> None:
         if self._noise_calibrating:
             self._refresh_status_labels()
             return
-        if self.runtime_state == self.RUNTIME_RUNNING and self.input_worker:
-            while True:
-                try:
-                    chunk = self.input_worker.queue.get_nowait()
-                except queue.Empty:
-                    break
-                messages = self.decoder.process_samples(chunk)
-                for message in messages:
-                    self._handle_decoded_message(message)
-            if self.input_worker.last_status:
-                self._log(f"Input status: {self.input_worker.last_status}")
-                self.input_worker.last_status = ""
+        if self.runtime_state == self.RUNTIME_RUNNING:
+            if (not self._is_keyboard_mode()) and self.input_worker:
+                while True:
+                    try:
+                        chunk = self.input_worker.queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    messages = self.decoder.process_samples(chunk)
+                    for message in messages:
+                        self._handle_decoded_message(message)
+                if self.input_worker.last_status:
+                    self._log(f"Input status: {self.input_worker.last_status}")
+                    self.input_worker.last_status = ""
         self._refresh_status_labels()
 
     def _refresh_status_labels(self) -> None:
@@ -1063,15 +1529,23 @@ class PotaTrainerWindow(MainWindowBase):
             self._reset_elapsed_clock()
             self.qso_counter = 0
             self.station_profiles.clear()
-        if not self._start_listening():
-            self._refresh_status_labels()
-            return
+        self._ensure_audio_pipeline()
+        if self._is_keyboard_mode():
+            self._stop_listening(clear_queue=True)
+            self._reset_keyboard_paddles(reset_keyer=True)
+        else:
+            if not self._start_listening():
+                self._refresh_status_labels()
+                return
         self._resume_elapsed_clock()
         self._set_runtime_state(self.RUNTIME_RUNNING)
         if previous == self.RUNTIME_PAUSED:
             self._log("Runtime resumed.")
         else:
-            self._log("Runtime started. Listening enabled.")
+            if self._is_keyboard_mode():
+                self._log("Runtime started. Keyboard iambic mode enabled.")
+            else:
+                self._log("Runtime started. Listening enabled.")
         self._refresh_status_labels()
 
     def _on_pause(self) -> None:
@@ -1079,6 +1553,7 @@ class PotaTrainerWindow(MainWindowBase):
             return
         self._pause_elapsed_clock()
         self._stop_listening(clear_queue=True)
+        self._reset_keyboard_paddles(reset_keyer=True)
         self._stop_audio_playback()
         self._set_runtime_state(self.RUNTIME_PAUSED)
         self._log("Runtime paused. QSO state preserved.")
@@ -1089,6 +1564,7 @@ class PotaTrainerWindow(MainWindowBase):
             return
         self._pause_elapsed_clock()
         self._stop_listening(clear_queue=True)
+        self._reset_keyboard_paddles(reset_keyer=True)
         self._stop_audio_playback()
         self._set_runtime_state(self.RUNTIME_STOPPED)
         self._reset_elapsed_clock()
@@ -1115,6 +1591,9 @@ class PotaTrainerWindow(MainWindowBase):
 
     def _on_calibrate(self) -> None:
         if self._noise_calibrating:
+            return
+        if self._is_keyboard_mode():
+            self._log("Noise calibration is only available in audio input mode.")
             return
         if sd is None:
             self._log("sounddevice not installed. Cannot calibrate noise.")
@@ -1198,6 +1677,31 @@ class PotaTrainerWindow(MainWindowBase):
         self.decoder.config.auto_tone = bool(checked)
         self._log(f"auto_tone={checked}")
 
+    def _on_input_mode_changed(self, _index: int) -> None:
+        mode = str(self.input_mode_combo.currentData() or "audio").strip().lower()
+        if mode not in {"audio", "keyboard"}:
+            mode = "audio"
+        if self.cfg.audio.input_mode == mode:
+            self._refresh_input_mode_controls()
+            return
+
+        self.cfg.audio.input_mode = mode
+        self._refresh_input_mode_controls()
+        self._reset_keyboard_paddles(reset_keyer=True)
+        self._update_keyboard_timer()
+        if mode == "keyboard":
+            self._stop_listening(clear_queue=True)
+            self._log("Input mode changed to keyboard (iambic A).")
+            return
+
+        if self.runtime_state == self.RUNTIME_RUNNING:
+            if self._start_listening():
+                self._log("Input mode changed to audio. Listening enabled.")
+            else:
+                self._log("Input mode changed to audio, but input start failed.")
+        else:
+            self._log("Input mode changed to audio.")
+
     def _on_input_changed(self, _index: int) -> None:
         device_id = self.input_combo.currentData()
         self.cfg.audio.input_device = device_id
@@ -1274,6 +1778,8 @@ class PotaTrainerWindow(MainWindowBase):
         self.text_splitter.setSizes([1, 0])
 
     def _on_apply_settings(self) -> None:
+        mode = str(self.input_mode_combo.currentData() or "audio").strip().lower()
+        self.cfg.audio.input_mode = mode if mode in {"audio", "keyboard"} else "audio"
         self.cfg.qso.my_call = self.my_call_edit.text().strip().upper() or self.cfg.qso.my_call
         self.cfg.qso.cq_mode = self._get_cq_mode_widget()
         self.cfg.qso.prosign_literal = self.prosign_edit.text().strip().upper() or "CAVE"
@@ -1317,6 +1823,14 @@ class PotaTrainerWindow(MainWindowBase):
         self.decoder = CWDecoder(self.cfg.decoder)
         self.encoder.config.wpm = self.cfg.encoder.wpm
         self.encoder.config.tone_hz = self.cfg.encoder.tone_hz
+        with self._keyboard_keyer_lock:
+            self.keyboard_keyer.config.sample_rate = int(self.cfg.audio.sample_rate)
+            self.keyboard_keyer.config.wpm = float(self.cfg.decoder.wpm_target)
+            self.keyboard_keyer.config.tone_hz = float(self.cfg.decoder.target_tone_hz)
+            self.keyboard_keyer.config.volume = float(self.cfg.encoder.volume)
+            self.keyboard_keyer.config.attack_ms = float(np.clip(self.cfg.encoder.attack_ms, 0.5, 1.5))
+            self.keyboard_keyer.config.release_ms = float(np.clip(self.cfg.encoder.release_ms, 0.5, 1.5))
+        self._clear_keyboard_audio_queue()
         self._sync_encoder_prosign_tokens()
 
         sm_cfg = self.state_machine.config
@@ -1333,8 +1847,9 @@ class PotaTrainerWindow(MainWindowBase):
 
         save_config(self.cfg_path, self.cfg)
         self._refresh_calls_file_status()
+        self._refresh_input_mode_controls()
         self._log(
-            f"Settings applied. incoming_call={incoming_pct}% "
+            f"Settings applied. mode={self.cfg.audio.input_mode}, incoming_call={incoming_pct}% "
             f"(enabled={self.cfg.qso.auto_incoming_after_qso}), "
             f"wpm_out_range={self.cfg.encoder.wpm_out_start:.1f}-{self.cfg.encoder.wpm_out_end:.1f}, "
             f"tone_hz_out_range={self.cfg.encoder.tone_hz_out_start:.1f}-{self.cfg.encoder.tone_hz_out_end:.1f}, "
@@ -1381,9 +1896,70 @@ class PotaTrainerWindow(MainWindowBase):
         out_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return out_file
 
+    def _ctrl_paddle_from_key_event(self, event: "QtGui.QKeyEvent") -> Optional[str]:
+        if QtCore is None:
+            return None
+        if event.key() != int(QtCore.Qt.Key.Key_Control):
+            return None
+
+        try:
+            native_vkey = int(event.nativeVirtualKey())
+        except Exception:
+            native_vkey = 0
+        if native_vkey in LEFT_CTRL_NATIVE_VKEYS:
+            return "dit"
+        if native_vkey in RIGHT_CTRL_NATIVE_VKEYS:
+            return "dah"
+
+        try:
+            native_scan = int(event.nativeScanCode())
+        except Exception:
+            native_scan = 0
+        if native_scan in LEFT_CTRL_NATIVE_SCANCODES:
+            return "dit"
+        if native_scan in RIGHT_CTRL_NATIVE_SCANCODES:
+            return "dah"
+        return None
+
+    def _handle_paddle_key_event(self, event: "QtGui.QKeyEvent") -> bool:
+        if QtCore is None:
+            return False
+        paddle = self._ctrl_paddle_from_key_event(event)
+        if paddle is None:
+            return False
+        if event.isAutoRepeat():
+            return True
+        is_press = event.type() == QtCore.QEvent.Type.KeyPress
+        if paddle == "dit":
+            self._left_ctrl_down = is_press
+        else:
+            self._right_ctrl_down = is_press
+        self.keyboard_keyer.set_paddles(dit=self._left_ctrl_down, dah=self._right_ctrl_down)
+        return True
+
+    def eventFilter(self, watched, event):  # type: ignore[override]
+        if QtCore is None or QtGui is None:
+            return super().eventFilter(watched, event)
+        if not isinstance(event, QtGui.QKeyEvent):
+            return super().eventFilter(watched, event)
+        if event.type() not in (QtCore.QEvent.Type.KeyPress, QtCore.QEvent.Type.KeyRelease):
+            return super().eventFilter(watched, event)
+        if self.runtime_state != self.RUNTIME_RUNNING or not self._is_keyboard_mode():
+            return super().eventFilter(watched, event)
+        if not self.isActiveWindow():
+            return super().eventFilter(watched, event)
+        if self._handle_paddle_key_event(event):
+            return True
+        return super().eventFilter(watched, event)
+
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self.timer.isActive():
             self.timer.stop()
+        if self.keyboard_timer.isActive():
+            self.keyboard_timer.stop()
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         if self.input_worker:
             self.input_worker.stop()
         if self.output_worker:
@@ -1397,6 +1973,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", default="config.yaml", help="YAML config path.")
     p.add_argument("--simulate", action="store_true", help="Run stdin simulation mode.")
     p.add_argument("--list-devices", action="store_true", help="List audio devices and exit.")
+    p.add_argument("--input-mode", choices=["audio", "keyboard"], default=None, help="Input mode.")
     p.add_argument("--input-device", type=int, default=None, help="Input device index.")
     p.add_argument("--output-device", type=int, default=None, help="Output device index.")
     p.add_argument("--my-call", default=None, help="My callsign.")
@@ -1426,6 +2003,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _apply_cli_overrides(cfg: AppConfig, args: argparse.Namespace) -> None:
+    if args.input_mode is not None:
+        cfg.audio.input_mode = str(args.input_mode).strip().lower()
     if args.input_device is not None:
         cfg.audio.input_device = args.input_device
     if args.output_device is not None:
