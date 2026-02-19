@@ -8,7 +8,7 @@ audio:
 decoder:
   sample_rate: 48000
   frame_ms: 10.0
-  target_tone_hz: 600.0
+  target_tone_hz: 620.0
   auto_tone: false
   tone_search_min_hz: 300.0
   tone_search_max_hz: 1200.0
@@ -16,7 +16,7 @@ decoder:
   threshold_off_mult: 2.4
   agc_alpha: 0.03
   power_smooth_alpha: 1.0
-  wpm_target: 24.0
+  wpm_target: 23.0
   auto_wpm: false
   dot_ms_min: 25.0
   dot_ms_max: 220.0

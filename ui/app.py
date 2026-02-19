@@ -130,7 +130,7 @@ class AudioOutputWorker:
     def __init__(self, encoder: CWEncoder, device: Optional[int], blocksize: int = 1024):
         self.encoder = encoder
         self.device = device
-        self.blocksize = int(np.clip(int(blocksize), 128, 256))
+        self.blocksize = 128
         self.queue: queue.Queue[object] = queue.Queue(maxsize=512)
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -962,6 +962,12 @@ class PotaTrainerWindow(MainWindowBase):
         log_toggle_row = QtWidgets.QHBoxLayout()
         self.clear_decoded_button = QtWidgets.QPushButton("Clear Decoding")
         log_toggle_row.addWidget(self.clear_decoded_button)
+        self.decoding_font_size_spin = QtWidgets.QSpinBox()
+        self.decoding_font_size_spin.setRange(8, 36)
+        self.decoding_font_size_spin.setValue(12)
+        self.decoding_font_size_spin.setSuffix(" pt")
+        self.decoding_font_size_spin.setMaximumWidth(90)
+        log_toggle_row.addWidget(self.decoding_font_size_spin)
         log_toggle_row.addStretch(1)
         self.logs_toggle_button = QtWidgets.QToolButton()
         self.logs_toggle_button.setCheckable(True)
@@ -974,6 +980,9 @@ class PotaTrainerWindow(MainWindowBase):
         self.copied_view.setReadOnly(True)
         self.logs_view = QtWidgets.QPlainTextEdit()
         self.logs_view.setReadOnly(True)
+        base_font_pt = int(round(max(float(self.copied_view.font().pointSizeF()), 10.0)))
+        self.decoding_font_size_spin.setValue(base_font_pt)
+        self._apply_decoding_font_size(base_font_pt)
         self.text_splitter.addWidget(self.copied_view)
         self.text_splitter.addWidget(self.logs_view)
         self.text_splitter.setSizes([240, 300])
@@ -995,6 +1004,7 @@ class PotaTrainerWindow(MainWindowBase):
         self.decoder_preset_slider.valueChanged.connect(self._on_decoder_preset_changed)
         self.apply_button.clicked.connect(self._on_apply_settings)
         self.clear_decoded_button.clicked.connect(self._on_clear_decoding)
+        self.decoding_font_size_spin.valueChanged.connect(self._on_decoding_font_size_changed)
         self.logs_toggle_button.toggled.connect(self._on_logs_toggled)
 
     def _populate_devices(self) -> None:
@@ -1666,6 +1676,14 @@ class PotaTrainerWindow(MainWindowBase):
         self.last_decoded = ""
         self._refresh_decoded_view()
         self._log("Decoded screen cleared.")
+
+    def _apply_decoding_font_size(self, size_pt: int) -> None:
+        font = self.copied_view.font()
+        font.setPointSize(max(int(size_pt), 8))
+        self.copied_view.setFont(font)
+
+    def _on_decoding_font_size_changed(self, value: int) -> None:
+        self._apply_decoding_font_size(int(value))
 
     def _on_auto_wpm_toggled(self, checked: bool) -> None:
         self.cfg.decoder.auto_wpm = bool(checked)
