@@ -25,6 +25,10 @@ Aplicacion multiplataforma (Windows/macOS/Linux, Python 3.11+) para practicar QS
 
 ## Instalacion 🛠️
 
+> Para Windows podrás encontrar un paquete precompilado en ZIP la sección de releases (https://github.com/dacacioa/cw-keyer-trainer/releases). Descomprime la carpeta CWKeyTrainer y ejecuta el CWKeyTrainer.exe
+
+Pasos para ejecutar desde el código fuente:
+
 ```bash
 git clone https://github.com/dacacioa/cw-keyer-trainer.git
 cd cw-keyer-trainer
