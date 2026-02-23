@@ -176,41 +176,77 @@ Comportamiento:
 
 ## Patrones de intercambio (regex)
 
-Los patrones de validacion de `S0`, `S2`, `S5` y las plantillas TX (`tx`) estan externalizados.
+La validacion de intercambios (`s0`, `s2`, `s5`) y las plantillas de TX (`tx`) se definen en fichero externo.
+
+Fichero y carga:
 - Fichero activo: `qso.exchange_patterns_file` en `config.yaml` (por defecto `data/exchange_patterns.yaml`).
-- El YAML admite raiz `patterns:` o raiz directa (`s0/s2/s5/tx`).
-- El contenido se mezcla con defaults internos: puedes sobreescribir solo las claves que necesites.
-- Si el fichero no existe o es invalido, la app usa defaults internos y deja un `WARN` en logs.
-- Los patrones se cargan al crear `QSOStateMachine` (inicio de app/simulador). Para aplicar cambios, reinicia la app.
+- Se carga al crear `QSOStateMachine` (arranque de GUI/simulador).
+- Si cambias el YAML, reinicia la app para recargarlo.
+- Si el fichero no existe, no es YAML valido o tiene raiz invalida, la app usa defaults internos y deja `WARN` en logs.
 
-El matching se hace sobre texto compactado (sin espacios) y en mayusculas.
+Formato del YAML:
+- Se acepta raiz `patterns:` o raiz directa con `s0/s2/s5/tx`.
+- `s0`, `s2`, `s5` usan lista de regex por clave.
+- `tx` usa plantillas de texto.
+- El merge es parcial sobre defaults: solo sobrescribes lo que declares.
+- Las listas vacias o strings vacios no borran defaults; simplemente se ignoran.
+
+Normalizacion antes de hacer match:
+- RX se convierte a mayusculas.
+- Se compacta sin espacios.
+- Prosigns tipo `<BK>` se compactan como `BK`.
+- Ejemplo: `CQ POTA DE EA3IPX K` se evalua como `CQPOTADEEA3IPXK`.
+
 Placeholders disponibles:
-`{MY_CALL}`, `{OTHER_CALL}`, `{OTHER_CALL_REAL}`, `{PROSIGN}`, `{TX_PROSIGN}`, `{CALL}`, `{PARK_REF}`, `{MY_PARK_REF}`.
+- `{MY_CALL}`, `{OTHER_CALL}`, `{OTHER_CALL_REAL}`, `{PROSIGN}`, `{TX_PROSIGN}`, `{CALL}`, `{PARK_REF}`, `{MY_PARK_REF}`.
+- En regex, los placeholders se sustituyen escapados como literal (no como sub-regex).
+- En `tx`, los placeholders se sustituyen como texto.
 
-Claves soportadas actualmente:
+Claves que usa el motor:
 - `s0`: `SIMPLE`, `POTA`, `SOTA`
 - `s2`: `report_require_call`, `report_require_call_allow_599`, `report_no_call`, `report_no_call_allow_599`, `p2p_ack`
 - `s5`: `with_prosign`, `with_prosign_allow_tu`, `without_prosign`, `without_prosign_allow_tu`, `p2p_with_prosign`, `p2p_with_prosign_allow_tu`, `p2p_without_prosign`, `p2p_without_prosign_allow_tu`
 - `tx`: `caller_call`, `repeat_selected_call`, `ack_rr`, `report_reply`, `qso_complete`, `p2p_repeat_call`, `p2p_repeat_ref`, `p2p_station_reply_without_tu`, `p2p_station_reply_with_tu`
 
-Recorte real del fichero por defecto (`data/exchange_patterns.yaml`):
+Notas importantes de claves:
+- En `s0`, las claves se normalizan a MAYUSCULAS (`simple` y `SIMPLE` equivalen).
+- En `s2/s5/tx`, las claves son case-sensitive y deben coincidir exacto.
+- Puedes anadir claves extra, pero si el motor no las consulta no tendran efecto.
+
+Ejemplo 1 (override minimo solo en S2):
 
 ```yaml
 patterns:
   s2:
     report_no_call:
-      - '^.*(?:[1-5][1-9N][9N]).*(?:[1-5][1-9N][9N]).*$'
+      - '^(?:5NN){2}$'
+```
+
+Ejemplo 2 (override de plantillas TX):
+
+```yaml
+patterns:
+  tx:
+    report_reply: 'CUSTOM REPORT {TX_PROSIGN}'
+    qso_complete: 'TU EE'
+```
+
+Recorte real del default (`data/exchange_patterns.yaml`):
+
+```yaml
+patterns:
+  s0:
+    SIMPLE:
+      - '^.*(?:CQ)+.*DE.*(?:{MY_CALL})+.*K.*$'
+  s2:
     p2p_ack:
       - '^{OTHER_CALL}$'
   tx:
     repeat_selected_call: '{OTHER_CALL} {OTHER_CALL}'
-    ack_rr: 'RR'
-    p2p_repeat_call: '{OTHER_CALL_REAL} {OTHER_CALL_REAL}'
-    p2p_repeat_ref: '{PARK_REF} {PARK_REF}'
     p2p_station_reply_without_tu: 'R R {OTHER_CALL_REAL} {OTHER_CALL_REAL} MY REF {PARK_REF} {PARK_REF} 73 {TX_PROSIGN}'
   s5:
-    p2p_without_prosign_allow_tu:
-      - '^.*{OTHER_CALL_REAL}.*{MY_CALL}.*MY.*REF.*{MY_PARK_REF}.*{MY_PARK_REF}.*TU.*73.*$'
+    with_prosign:
+      - '^.*{PROSIGN}.*73.*EE.*$'
 ```
 
 ## Guion QSO soportado 📜
