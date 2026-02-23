@@ -72,3 +72,16 @@ audio:
     )
     cfg2 = load_config(cfg_path)
     assert cfg2.audio.input_mode == "audio"
+
+
+def test_load_config_clamps_p2p_probability(tmp_path: Path):
+    cfg_path = tmp_path / "config.yaml"
+    _write_yaml(
+        cfg_path,
+        """
+qso:
+  p2p_probability: 3.5
+""".strip(),
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.qso.p2p_probability == 1.0

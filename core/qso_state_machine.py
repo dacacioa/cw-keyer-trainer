@@ -5,9 +5,12 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
+from .exchange_patterns import ExchangePatterns, load_exchange_patterns
 from .morse import PROSIGN_TOKEN, collapse_cave_tokens, tokenize_text
+
+_S2_REPORT_RE = re.compile(r"[1-5][1-9N][9N]")
 
 
 class QSOState(str, Enum):
@@ -26,8 +29,12 @@ class QSOConfig:
     cq_mode: str = "POTA"  # SIMPLE, POTA, SOTA
     max_stations: int = 1
     other_calls_file: Optional[str] = None
+    parks_file: Optional[str] = "data/all_parks_ext.csv"
+    exchange_patterns_file: Optional[str] = "data/exchange_patterns.yaml"
     auto_incoming_after_qso: bool = False
     auto_incoming_probability: float = 0.5
+    p2p_probability: float = 0.0
+    my_park_ref: str = "EA-0000"
     allow_599: bool = False
     allow_tu: bool = False
     use_prosigns: bool = True
@@ -64,19 +71,32 @@ class QSOStateMachine:
         self.completions: List[QSOCompletion] = []
         self.logs: List[Dict[str, str]] = []
         self._other_call_pool: List[str] = []
+        self._park_ref_pool: List[str] = []
+        self._active_other_call_real = self.config.other_call.upper()
         self._active_other_call = self.config.other_call.upper()
         self._s2_rr_confirmed = False
         self._pending_callers: List[str] = []
+        self._pending_p2p_real_call: Optional[str] = None
         self._active_call_selected = False
+        self._active_is_p2p = False
+        self._active_p2p_park_ref: Optional[str] = None
+        self._exchange_patterns: ExchangePatterns
+        self._exchange_patterns, pattern_error = load_exchange_patterns(self.config.exchange_patterns_file)
+        if pattern_error:
+            self._log("WARN", pattern_error, self.state)
 
     def reset(self) -> None:
         self.state = QSOState.S0_IDLE
         self.rx_transcript.clear()
         self.tx_transcript.clear()
+        self._active_other_call_real = self.config.other_call.upper()
         self._active_other_call = self.config.other_call.upper()
         self._s2_rr_confirmed = False
         self._pending_callers.clear()
+        self._pending_p2p_real_call = None
         self._active_call_selected = False
+        self._active_is_p2p = False
+        self._active_p2p_park_ref = None
         self._log("INFO", "QSO reset manual", self.state)
 
     def set_other_call_pool(self, calls: Sequence[str], source_file: Optional[str] = None) -> None:
@@ -89,6 +109,8 @@ class QSOStateMachine:
             seen.add(c)
             cleaned.append(c)
         self._other_call_pool = cleaned
+        if self._pending_p2p_real_call and self._pending_p2p_real_call not in cleaned:
+            self._pending_p2p_real_call = None
         if source_file is not None:
             self.config.other_calls_file = source_file
         if cleaned:
@@ -96,13 +118,38 @@ class QSOStateMachine:
         else:
             self._log("INFO", "Dynamic callsign pool is empty; using fixed other_call.", self.state)
 
+    def set_park_ref_pool(self, park_refs: Sequence[str], source_file: Optional[str] = None) -> None:
+        cleaned: List[str] = []
+        seen = set()
+        for ref in park_refs:
+            r = ref.strip().upper()
+            if not r or r in seen:
+                continue
+            seen.add(r)
+            cleaned.append(r)
+        self._park_ref_pool = cleaned
+        if source_file is not None:
+            self.config.parks_file = source_file
+        if cleaned:
+            self._log("INFO", f"Loaded {len(cleaned)} active park references.", self.state)
+        else:
+            self._log("INFO", "Active park reference pool is empty; P2P disabled.", self.state)
+
     @property
     def active_other_call(self) -> str:
         return self._active_other_call
 
     @property
+    def active_other_call_real(self) -> str:
+        return self._active_other_call_real
+
+    @property
     def other_call_pool_size(self) -> int:
         return len(self._other_call_pool)
+
+    @property
+    def park_ref_pool_size(self) -> int:
+        return len(self._park_ref_pool)
 
     def process_text(self, text: str) -> QSOResult:
         tokens = self._normalize_tokens(text)
@@ -129,8 +176,13 @@ class QSOStateMachine:
             "state": self.state.value,
             "config": asdict(self.config),
             "active_other_call": self._active_other_call,
+            "active_other_call_real": self._active_other_call_real,
+            "active_is_p2p": self._active_is_p2p,
+            "active_p2p_park_ref": self._active_p2p_park_ref,
             "pending_callers": list(self._pending_callers),
+            "pending_p2p_real_call": self._pending_p2p_real_call,
             "active_call_selected": self._active_call_selected,
+            "park_ref_pool_size": len(self._park_ref_pool),
             "logs": self.logs,
             "completions": [asdict(c) for c in self.completions],
             "rx_transcript": self.rx_transcript,
@@ -141,20 +193,24 @@ class QSOStateMachine:
         cq_mode = (self.config.cq_mode or "POTA").strip().upper()
         if cq_mode not in ("SIMPLE", "POTA", "SOTA"):
             cq_mode = "POTA"
-        required: List[str] = ["CQ", "CQ"]
+        required: List[str] = ["CQ"]
         if cq_mode in ("POTA", "SOTA"):
-            required.extend([cq_mode, "DE"])
-        required.extend(
-            [
-                self.config.my_call.upper(),
-                self.config.my_call.upper(),
-                "K",
-            ]
-        )
-        ok, missing = _contains_subsequence_flexible(tokens, required)
+            required.append(cq_mode)
+        required.extend(["DE", self.config.my_call.upper(), "K"])
+        missing = ""
+        patterns = self._exchange_patterns.s0.get(cq_mode, tuple())
+        if patterns:
+            ok = self._match_compact_exchange_patterns(patterns, tokens)
+            _, missing = _contains_subsequence_flexible(tokens, required)
+        else:
+            ok, missing = _contains_subsequence_flexible(tokens, required)
+
         result = QSOResult(state=self.state, accepted=ok)
         if not ok:
-            result.errors.append(f"S0 invalido: falto o no coincide token '{missing}'.")
+            if missing:
+                result.errors.append(f"S0 invalido: falto o no coincide token '{missing}'.")
+            else:
+                result.errors.append(f"S0 invalido: no coincide con patron de CQ para modo '{cq_mode}'.")
             self._log("ERR", result.errors[-1], self.state)
             return result
 
@@ -175,7 +231,7 @@ class QSOStateMachine:
 
         call = self._active_other_call
         if _is_full_call_query(tokens, call):
-            reply = "RR"
+            reply = self._build_tx_from_template("ack_rr", fallback="RR")
             self.tx_transcript.append(reply)
             self._log("TX", reply, self.state)
             self._s2_rr_confirmed = True
@@ -187,7 +243,12 @@ class QSOStateMachine:
             )
 
         if _is_repeat_request_for_call(tokens, call):
-            reply = f"{call} {call}"
+            reply = self._build_tx_from_template(
+                "repeat_selected_call",
+                fallback=f"{call} {call}",
+                other_call=call,
+                extra_values={"CALL": call},
+            )
             self.tx_transcript.append(reply)
             self._log("TX", reply, self.state)
             return QSOResult(
@@ -206,10 +267,13 @@ class QSOStateMachine:
             return QSOResult(state=self.state, accepted=False, errors=[msg])
 
         # Exact full query (e.g. EA3IMR?) selects only that station and replies RR.
-        selected_query = next((c for c in self._pending_callers if _is_full_call_query(tokens, c)), None)
+        selected_query = next(
+            (c for c in self._pending_callers if _is_full_call_query(tokens, self._display_call(c))),
+            None,
+        )
         if selected_query:
             self._select_pending_station(selected_query)
-            reply = "RR"
+            reply = self._build_tx_from_template("ack_rr", fallback="RR")
             self.tx_transcript.append(reply)
             self._log("TX", reply, self.state)
             self._s2_rr_confirmed = True
@@ -217,7 +281,7 @@ class QSOStateMachine:
                 state=self.state,
                 accepted=True,
                 replies=[reply],
-                info=[f"Estacion {selected_query} seleccionada. RR enviado."],
+                info=[f"Estacion {self._active_other_call} seleccionada. RR enviado."],
             )
 
         wildcard_patterns = _extract_wildcard_patterns(tokens)
@@ -250,7 +314,12 @@ class QSOStateMachine:
     def _handle_s2_direct_report(self, tokens: Sequence[str]) -> QSOResult:
         call = self._active_other_call
         if _is_repeat_request_for_call(tokens, call):
-            reply = f"{call} {call}"
+            reply = self._build_tx_from_template(
+                "repeat_selected_call",
+                fallback=f"{call} {call}",
+                other_call=call,
+                extra_values={"CALL": call},
+            )
             self.tx_transcript.append(reply)
             self._log("TX", reply, self.state)
             return QSOResult(
@@ -265,30 +334,62 @@ class QSOStateMachine:
             ignore_bk=self.config.ignore_bk,
             ignore_tokens=self.config.ignore_fill_tokens,
         )
-        needed_call = call
-        report_tokens = {"5NN"}
-        if self.config.allow_599:
-            report_tokens.add("599")
+        if self._active_is_p2p:
+            p2p_patterns = self._exchange_patterns.s2.get("p2p_ack", tuple())
+            if p2p_patterns:
+                if not self._match_compact_exchange_patterns(p2p_patterns, cleaned, other_call="P2P"):
+                    msg = "S2 invalido: para P2P debes contestar con 'P2P'."
+                    result = QSOResult(state=self.state, accepted=False, errors=[msg])
+                    self._log("ERR", msg, self.state)
+                    return result
+            elif _count_token_flexible(cleaned, "P2P") < 1:
+                msg = "S2 invalido: para P2P debes contestar con 'P2P'."
+                result = QSOResult(state=self.state, accepted=False, errors=[msg])
+                self._log("ERR", msg, self.state)
+                return result
 
-        missing: List[str] = []
+            reply = self._build_p2p_station_reply()
+            self.state = QSOState.S4_REPLY_OTHER
+            self._s2_rr_confirmed = False
+            self.tx_transcript.append(reply)
+            self._log("TX", reply, self.state)
+            self.state = QSOState.S5_WAIT_FINAL
+            return QSOResult(
+                state=self.state,
+                accepted=True,
+                replies=[reply],
+                info=["Intercambio P2P enviado. Esperando cierre final con tu referencia de parque."],
+            )
+
         # Once a station is selected, report may omit the call.
         require_call = (not self._active_call_selected) and (not self._s2_rr_confirmed)
-        if require_call and _count_token_flexible(cleaned, needed_call) < 1:
-            missing.append(needed_call)
-        report_count = max(_count_token_flexible(cleaned, tok) for tok in report_tokens)
-        if report_count < 2:
-            missing.append("5NN 5NN")
-
-        result = QSOResult(state=self.state, accepted=not missing)
-        if missing:
-            msg = "S2 invalido: faltan tokens obligatorios: " + ", ".join(missing)
-            result.errors.append(msg)
-            self._log("ERR", msg, self.state)
-            return result
+        pattern_key = "report_require_call" if require_call else "report_no_call"
+        if self.config.allow_599:
+            pattern_key += "_allow_599"
+        patterns = self._exchange_patterns.s2.get(pattern_key, tuple())
+        if patterns:
+            if not self._match_compact_exchange_patterns(patterns, cleaned, other_call=call):
+                missing = self._legacy_s2_missing_tokens(cleaned, call=call, require_call=require_call)
+                msg = f"S2 invalido: no coincide con patron '{pattern_key}'."
+                if missing:
+                    msg += " Faltan: " + ", ".join(missing)
+                result = QSOResult(state=self.state, accepted=False, errors=[msg])
+                self._log("ERR", msg, self.state)
+                return result
+        else:
+            missing = self._legacy_s2_missing_tokens(cleaned, call=call, require_call=require_call)
+            if missing:
+                msg = "S2 invalido: faltan tokens obligatorios: " + ", ".join(missing)
+                result = QSOResult(state=self.state, accepted=False, errors=[msg])
+                self._log("ERR", msg, self.state)
+                return result
 
         tx_prosign = self._tx_closing_prosign()
         # In direct mode, report reply starts with prosign and omits my callsign.
-        reply = f"{tx_prosign} UR 5NN 5NN TU 73 {tx_prosign}"
+        reply = self._build_tx_from_template(
+            "report_reply",
+            fallback=f"{tx_prosign} UR 5NN 5NN TU 73 {tx_prosign}",
+        )
         self.state = QSOState.S4_REPLY_OTHER
         self._s2_rr_confirmed = False
         self.tx_transcript.append(reply)
@@ -302,42 +403,78 @@ class QSOStateMachine:
         )
 
     def _handle_s5(self, tokens: Sequence[str]) -> QSOResult:
-        cleaned = _strip_fillers(
-            _collapse_double_e(tokens),
-            ignore_bk=self.config.ignore_bk,
-            ignore_tokens=self.config.ignore_fill_tokens,
-        )
-        prosign_token = self._prosign_token()
-        if self.config.use_prosigns:
-            if _count_token_direct(cleaned, prosign_token) < 1:
-                msg = f"S5 invalido: prosign {prosign_token} debe enviarse sin separacion entre letras."
+        if self._active_is_p2p and self._active_p2p_park_ref:
+            p2p_query = self._handle_s5_p2p_query(tokens)
+            if p2p_query is not None:
+                return p2p_query
+
+        if _is_repeat_request_for_call(tokens, self._active_other_call):
+            if not self.tx_transcript:
+                msg = "S5 invalido: no hay transmision previa para repetir."
                 result = QSOResult(state=self.state, accepted=False, errors=[msg])
                 self._log("ERR", msg, self.state)
                 return result
-            required_basic = [prosign_token, "73", "EE"]
-            required_tu = [prosign_token, "TU", "73", "EE"]
-        else:
-            required_basic = ["73", "EE"]
-            required_tu = ["TU", "73", "EE"]
+            reply = self.tx_transcript[-1]
+            self.tx_transcript.append(reply)
+            self._log("TX", reply, self.state)
+            return QSOResult(
+                state=self.state,
+                accepted=True,
+                replies=[reply],
+                info=["Solicitud de repeticion detectada; repito ultima transmision y sigo en S5."],
+            )
 
-        ok_basic, missing_basic = _contains_subsequence_flexible(cleaned, required_basic)
-        ok_tu = False
+        cleaned = _strip_fillers(
+            _collapse_double_e(tokens),
+            ignore_bk=self.config.ignore_bk and (not self.config.use_prosigns),
+            ignore_tokens=self.config.ignore_fill_tokens,
+        )
+        if self._active_is_p2p and self._active_p2p_park_ref:
+            return self._handle_s5_p2p(cleaned)
+
+        pattern_key = "with_prosign" if self.config.use_prosigns else "without_prosign"
         if self.config.allow_tu:
-            ok_tu, _ = _contains_subsequence_flexible(cleaned, required_tu)
-
-        result = QSOResult(state=self.state, accepted=ok_basic or ok_tu)
-        if not result.accepted:
+            pattern_key += "_allow_tu"
+        patterns = self._exchange_patterns.s5.get(pattern_key, tuple())
+        if patterns:
+            ok = self._match_compact_exchange_patterns(patterns, cleaned)
+            if not ok:
+                msg = f"S5 invalido: no coincide con patron '{pattern_key}'."
+                result = QSOResult(state=self.state, accepted=False, errors=[msg])
+                self._log("ERR", msg, self.state)
+                return result
+        else:
+            prosign_token = self._prosign_token()
             if self.config.use_prosigns:
-                expected = f"{prosign_token} 73 EE"
+                if _count_token_direct(cleaned, prosign_token) < 1:
+                    msg = f"S5 invalido: prosign {prosign_token} debe enviarse sin separacion entre letras."
+                    result = QSOResult(state=self.state, accepted=False, errors=[msg])
+                    self._log("ERR", msg, self.state)
+                    return result
+                required_basic = [prosign_token, "73", "EE"]
+                required_tu = [prosign_token, "TU", "73", "EE"]
             else:
-                expected = "73 EE"
-            msg = f"S5 invalido: cierre esperado '{expected}' (falto '{missing_basic}')."
-            result.errors.append(msg)
-            self._log("ERR", msg, self.state)
-            return result
+                required_basic = ["73", "EE"]
+                required_tu = ["TU", "73", "EE"]
+
+            ok_basic, missing_basic = _contains_subsequence_flexible(cleaned, required_basic)
+            ok_tu = False
+            if self.config.allow_tu:
+                ok_tu, _ = _contains_subsequence_flexible(cleaned, required_tu)
+
+            result = QSOResult(state=self.state, accepted=ok_basic or ok_tu)
+            if not result.accepted:
+                if self.config.use_prosigns:
+                    expected = f"{prosign_token} 73 EE"
+                else:
+                    expected = "73 EE"
+                msg = f"S5 invalido: cierre esperado '{expected}' (falto '{missing_basic}')."
+                result.errors.append(msg)
+                self._log("ERR", msg, self.state)
+                return result
 
         return self._complete_qso_with_reply(
-            reply="EE",
+            reply=self._build_tx_from_template("qso_complete", fallback="EE"),
             interim_state=QSOState.S6_REPLY_EE,
             info="QSO completado. Vuelta a S0.",
         )
@@ -355,6 +492,116 @@ class QSOStateMachine:
                 out.append(t.upper())
         return out
 
+    def _handle_s5_p2p(self, cleaned: Sequence[str]) -> QSOResult:
+        key = "p2p_with_prosign" if self.config.use_prosigns else "p2p_without_prosign"
+        if self.config.allow_tu:
+            key += "_allow_tu"
+        patterns = self._exchange_patterns.s5.get(key, tuple())
+        if patterns:
+            ok = self._match_compact_exchange_patterns(patterns, cleaned)
+            if not ok:
+                msg = f"S5 invalido: no coincide con patron P2P '{key}'."
+                result = QSOResult(state=self.state, accepted=False, errors=[msg])
+                self._log("ERR", msg, self.state)
+                return result
+        else:
+            my_park = (self.config.my_park_ref or "").strip().upper()
+            if not my_park:
+                my_park = "EA-0000"
+            required: List[str] = []
+            if self.config.use_prosigns:
+                required.append(self._prosign_token())
+            required.extend([self._active_other_call_real, self.config.my_call.upper(), "MY", "REF", my_park, my_park])
+            if self.config.allow_tu:
+                required.extend(["TU", "73"])
+            ok, missing = _contains_subsequence_flexible(cleaned, required)
+            if not ok:
+                expected = " ".join(required)
+                msg = f"S5 invalido: cierre P2P esperado '{expected}' (falto '{missing}')."
+                result = QSOResult(state=self.state, accepted=False, errors=[msg])
+                self._log("ERR", msg, self.state)
+                return result
+
+        return self._complete_qso_with_reply(
+            reply=self._build_tx_from_template("qso_complete", fallback="EE"),
+            interim_state=QSOState.S6_REPLY_EE,
+            info="QSO P2P completado. Vuelta a S0.",
+        )
+
+    def _handle_s5_p2p_query(self, tokens: Sequence[str]) -> Optional[QSOResult]:
+        query = _compact_join(tokens)
+        if query == "CALL?":
+            call = self._active_other_call_real
+            reply = self._build_tx_from_template(
+                "p2p_repeat_call",
+                fallback=f"{call} {call}",
+                other_call=call,
+                extra_values={"CALL": call},
+            )
+            self.tx_transcript.append(reply)
+            self._log("TX", reply, self.state)
+            return QSOResult(
+                state=self.state,
+                accepted=True,
+                replies=[reply],
+                info=["Solicitud 'CALL?' en P2P: repito indicativo del llamante y sigo en S5."],
+            )
+
+        if query == "REF?":
+            park = _compact_park_ref(self._active_p2p_park_ref or "")
+            reply = self._build_tx_from_template(
+                "p2p_repeat_ref",
+                fallback=f"{park} {park}",
+                extra_values={"PARK_REF": park},
+            )
+            self.tx_transcript.append(reply)
+            self._log("TX", reply, self.state)
+            return QSOResult(
+                state=self.state,
+                accepted=True,
+                replies=[reply],
+                info=["Solicitud 'REF?' en P2P: repito referencia de parque y sigo en S5."],
+            )
+        return None
+
+    def _build_p2p_station_reply(self) -> str:
+        key = "p2p_station_reply_with_tu" if self.config.allow_tu else "p2p_station_reply_without_tu"
+        template = self._exchange_patterns.tx.get(key, "")
+        values = dict(self._exchange_pattern_values())
+        values["PARK_REF"] = _compact_park_ref(self._active_p2p_park_ref or "")
+        values["MY_PARK_REF"] = _compact_park_ref(self.config.my_park_ref or "")
+        if template:
+            return _clean_message_spacing(_render_exchange_template(template, values))
+
+        tx_prosign = self._tx_closing_prosign()
+        parts = [tx_prosign, self._active_other_call_real, self._active_other_call_real, "MY", "REF"]
+        park = _compact_park_ref(self._active_p2p_park_ref or "")
+        if park:
+            parts.extend([park, park])
+        if self.config.allow_tu:
+            parts.append("TU")
+        parts.extend(["73", tx_prosign])
+        return _clean_message_spacing(" ".join(parts))
+
+    def _build_tx_from_template(
+        self,
+        key: str,
+        *,
+        fallback: str,
+        other_call: Optional[str] = None,
+        extra_values: Optional[Mapping[str, str]] = None,
+    ) -> str:
+        template = (self._exchange_patterns.tx.get(key, "") or "").strip()
+        if not template:
+            return _clean_message_spacing(fallback)
+        values = dict(self._exchange_pattern_values(other_call=other_call))
+        values["PARK_REF"] = _compact_park_ref(self._active_p2p_park_ref or "")
+        values["MY_PARK_REF"] = _compact_park_ref(self.config.my_park_ref or "")
+        if extra_values:
+            for name, value in extra_values.items():
+                values[name] = _compact_token(value)
+        return _clean_message_spacing(_render_exchange_template(template, values))
+
     def _prosign_token(self) -> str:
         literal = "".join(ch for ch in self.config.prosign_literal.strip().upper() if ch.isalnum())
         return f"<{literal or 'CAVE'}>"
@@ -362,6 +609,46 @@ class QSOStateMachine:
     def _tx_closing_prosign(self) -> str:
         literal = "".join(ch for ch in self.config.prosign_literal.strip().upper() if ch.isalnum())
         return literal or "KN"
+
+    def _exchange_pattern_values(self, *, other_call: Optional[str] = None) -> Mapping[str, str]:
+        my_park = (self.config.my_park_ref or "").strip().upper() or "EA-0000"
+        return {
+            "MY_CALL": _compact_token(self.config.my_call),
+            "OTHER_CALL": _compact_token(other_call or self._active_other_call),
+            "CALL": _compact_token(other_call or self._active_other_call),
+            "OTHER_CALL_REAL": _compact_token(self._active_other_call_real),
+            "PROSIGN": _compact_token(self._prosign_token()),
+            "TX_PROSIGN": _compact_token(self._tx_closing_prosign()),
+            "PARK_REF": _compact_token(self._active_p2p_park_ref or ""),
+            "MY_PARK_REF": _compact_token(my_park),
+        }
+
+    def _match_compact_exchange_patterns(
+        self,
+        patterns: Sequence[str],
+        tokens: Sequence[str],
+        *,
+        other_call: Optional[str] = None,
+    ) -> bool:
+        compact = _compact_join(tokens)
+        values = self._exchange_pattern_values(other_call=other_call)
+        for raw_pattern in patterns:
+            rendered = _render_exchange_pattern(raw_pattern, values)
+            try:
+                if re.fullmatch(rendered, compact):
+                    return True
+            except re.error:
+                self._log("WARN", f"Regex invalida en patron de intercambio: {raw_pattern}", self.state)
+        return False
+
+    def _legacy_s2_missing_tokens(self, tokens: Sequence[str], *, call: str, require_call: bool) -> List[str]:
+        missing: List[str] = []
+        if require_call and _count_token_flexible(tokens, call) < 1:
+            missing.append(call)
+        report_count = _count_valid_s2_reports(tokens)
+        if report_count < 2:
+            missing.append("RST RST")
+        return missing
 
     def _log(self, level: str, message: str, state: QSOState) -> None:
         self.logs.append(
@@ -376,7 +663,7 @@ class QSOStateMachine:
             self.logs = self.logs[-1000:]
 
     def _complete_qso_with_reply(self, reply: str, interim_state: QSOState, info: str) -> QSOResult:
-        completed_call = self._active_other_call
+        completed_call = self._formatted_completion_other_call()
         self.state = interim_state
         self.tx_transcript.append(reply)
         self._log("TX", reply, self.state)
@@ -392,9 +679,12 @@ class QSOStateMachine:
         self._log("INFO", "QSO completado", self.state)
 
         self.state = QSOState.S0_IDLE
+        self._active_other_call_real = self.config.other_call.upper()
         self._active_other_call = self.config.other_call.upper()
         self._active_call_selected = False
         self._s2_rr_confirmed = False
+        self._active_is_p2p = False
+        self._active_p2p_park_ref = None
         out_replies = [reply]
         out_info = [info]
 
@@ -415,6 +705,11 @@ class QSOStateMachine:
             info=out_info,
         )
 
+    def _formatted_completion_other_call(self) -> str:
+        if self._active_is_p2p and self._active_p2p_park_ref:
+            return f"{self._active_other_call_real} (P2P) {self._active_p2p_park_ref}"
+        return self._active_other_call_real
+
     def _select_other_call_for_qso(self) -> str:
         if self._other_call_pool:
             return random.choice(self._other_call_pool)
@@ -426,26 +721,64 @@ class QSOStateMachine:
 
         pool = [c.upper() for c in self._other_call_pool if c.strip()]
         if not pool:
+            self._pending_p2p_real_call = None
             return [self.config.other_call.upper()]
 
         requested = min(requested, len(pool))
         if requested <= 0:
+            self._pending_p2p_real_call = None
             return [self.config.other_call.upper()]
-        return random.sample(pool, requested)
+        callers = random.sample(pool, requested)
+        self._pending_p2p_real_call = self._pick_p2p_caller(callers)
+        return callers
 
     def _emit_callers(self, callers: Sequence[str]) -> List[str]:
         # Random delay ordering (0..2s per station) is represented as random order.
         ordered = list(callers)
         random.shuffle(ordered)
+        if self._pending_p2p_real_call and self._pending_p2p_real_call in ordered:
+            ordered.remove(self._pending_p2p_real_call)
+            ordered.insert(0, self._pending_p2p_real_call)
         self.state = QSOState.S1_REPLY_CALL
         replies: List[str] = []
         for call in ordered:
-            reply = f"{call} {call}"
+            shown = self._display_call(call)
+            reply = self._build_tx_from_template(
+                "caller_call",
+                fallback=f"{shown} {shown}",
+                other_call=shown,
+                extra_values={"CALL": shown},
+            )
             self.tx_transcript.append(reply)
             self._log("TX", reply, self.state)
             replies.append(reply)
         self.state = QSOState.S2_WAIT_MY_ACK_CALL
         return replies
+
+    def _pick_p2p_caller(self, callers: Sequence[str]) -> Optional[str]:
+        mode = (self.config.cq_mode or "POTA").strip().upper()
+        if mode != "POTA":
+            return None
+        if not self._park_ref_pool:
+            return None
+        p = max(0.0, min(1.0, float(self.config.p2p_probability)))
+        if p <= 0.0:
+            return None
+        if random.random() >= p:
+            return None
+        if not callers:
+            return None
+        return random.choice(list(callers))
+
+    def _display_call(self, real_call: str) -> str:
+        if self._pending_p2p_real_call and real_call == self._pending_p2p_real_call:
+            return "P2P"
+        return real_call
+
+    def _pick_park_ref(self) -> Optional[str]:
+        if not self._park_ref_pool:
+            return None
+        return random.choice(self._park_ref_pool)
 
     def _find_exact_pending_call(self, tokens: Sequence[str]) -> Optional[str]:
         if not self._pending_callers:
@@ -453,7 +786,7 @@ class QSOStateMachine:
         hay = _compact_join(tokens)
         best: Optional[Tuple[int, str]] = None
         for call in self._pending_callers:
-            needle = _compact_token(call)
+            needle = _compact_token(self._display_call(call))
             pos = hay.find(needle)
             if pos < 0:
                 continue
@@ -462,10 +795,21 @@ class QSOStateMachine:
         return best[1] if best else None
 
     def _select_pending_station(self, call: str) -> None:
-        self._active_other_call = call
+        self._active_other_call_real = call
+        self._active_is_p2p = bool(self._pending_p2p_real_call and call == self._pending_p2p_real_call)
+        if self._active_is_p2p:
+            self._active_other_call = "P2P"
+            self._active_p2p_park_ref = self._pick_park_ref()
+        else:
+            self._active_other_call = call
+            self._active_p2p_park_ref = None
+        if self._pending_p2p_real_call and call == self._pending_p2p_real_call:
+            self._pending_p2p_real_call = None
         self._active_call_selected = True
         self._s2_rr_confirmed = False
         self._pending_callers = [c for c in self._pending_callers if c != call]
+        if self._pending_p2p_real_call and self._pending_p2p_real_call not in self._pending_callers:
+            self._pending_p2p_real_call = None
 
     def _match_pending_by_patterns(self, patterns: Sequence[str]) -> List[str]:
         matches: List[str] = []
@@ -474,7 +818,8 @@ class QSOStateMachine:
             for call in self._pending_callers:
                 if call in seen:
                     continue
-                if _wildcard_matches_call(pattern, call):
+                shown = self._display_call(call)
+                if _wildcard_matches_call(pattern, shown):
                     seen.add(call)
                     matches.append(call)
         return matches
@@ -493,6 +838,24 @@ class QSOStateMachine:
         self._s2_rr_confirmed = False
         self._pending_callers = self._draw_new_incoming_callers()
         return self._emit_callers(self._pending_callers)
+
+
+def _render_exchange_pattern(pattern: str, values: Mapping[str, str]) -> str:
+    rendered = pattern
+    for name, value in values.items():
+        rendered = rendered.replace(f"{{{name}}}", re.escape(value))
+    return rendered
+
+
+def _render_exchange_template(template: str, values: Mapping[str, str]) -> str:
+    rendered = template
+    for name, value in values.items():
+        rendered = rendered.replace(f"{{{name}}}", value)
+    return rendered
+
+
+def _clean_message_spacing(text: str) -> str:
+    return " ".join(part for part in text.split(" ") if part)
 
 
 def _contains_subsequence(observed: Sequence[str], required: Sequence[str]) -> Tuple[bool, str]:
@@ -519,6 +882,16 @@ def _contains_subsequence_flexible(observed: Sequence[str], required: Sequence[s
     if ok_compact:
         return True, ""
     return False, missing_compact or missing
+
+
+def _count_valid_s2_reports(tokens: Sequence[str]) -> int:
+    direct = sum(1 for tok in tokens if _is_valid_s2_report_token(tok))
+    compact = len(_S2_REPORT_RE.findall(_compact_join(tokens)))
+    return max(direct, compact)
+
+
+def _is_valid_s2_report_token(token: str) -> bool:
+    return _S2_REPORT_RE.fullmatch(_compact_token(token)) is not None
 
 
 def _count_token_flexible(tokens: Sequence[str], token: str) -> int:
@@ -570,6 +943,10 @@ def _compact_token(token: str) -> str:
     if tok.startswith("<") and tok.endswith(">") and len(tok) > 2:
         tok = tok[1:-1]
     return tok.replace(" ", "")
+
+
+def _compact_park_ref(token: str) -> str:
+    return _compact_token(token).replace("-", "")
 
 
 def _is_repeat_request_for_call(tokens: Sequence[str], call: str) -> bool:

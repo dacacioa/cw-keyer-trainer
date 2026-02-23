@@ -1,0 +1,67 @@
+# Input is normalized before matching:
+# - Uppercase
+# - No spaces between tokens
+# - Prosigns like <BK> are compacted to BK
+#
+# Placeholders replaced at runtime (escaped as literals):
+# - {MY_CALL}
+# - {OTHER_CALL}
+# - {OTHER_CALL_REAL}
+# - {PROSIGN}
+# - {TX_PROSIGN}
+# - {CALL}
+# - {PARK_REF}
+# - {MY_PARK_REF}
+#
+# Example:
+#   "CQ POTA DE EA3IPX K" -> "CQPOTADEEA3IPXK"
+
+patterns:
+  s0:
+    SIMPLE:
+      - '^.*(?:CQ)+.*DE.*(?:{MY_CALL})+.*K.*$'
+    POTA:
+      - '^.*(?:CQ)+.*POTA.*DE.*(?:{MY_CALL})+.*K.*$'
+    SOTA:
+      - '^.*(?:CQ)+.*SOTA.*DE.*(?:{MY_CALL})+.*K.*$'
+
+  s2:
+    report_require_call:
+      - '^.*{OTHER_CALL}.*(?:[1-5][1-9N][9N]).*(?:[1-5][1-9N][9N]).*$'
+    report_require_call_allow_599:
+      - '^.*{OTHER_CALL}.*(?:[1-5][1-9N][9N]).*(?:[1-5][1-9N][9N]).*$'
+    report_no_call:
+      - '^.*(?:[1-5][1-9N][9N]).*(?:[1-5][1-9N][9N]).*$'
+    report_no_call_allow_599:
+      - '^.*(?:[1-5][1-9N][9N]).*(?:[1-5][1-9N][9N]).*$'
+    p2p_ack:
+      - '^{OTHER_CALL}$'
+
+  tx:
+    caller_call: '{CALL} {CALL}'
+    repeat_selected_call: '{OTHER_CALL} {OTHER_CALL}'
+    ack_rr: 'RR'
+    report_reply: '{TX_PROSIGN} UR 5NN 5NN TU 73 {TX_PROSIGN}'
+    qso_complete: 'EE'
+    p2p_repeat_call: '{OTHER_CALL_REAL} {OTHER_CALL_REAL}'
+    p2p_repeat_ref: '{PARK_REF} {PARK_REF}'
+    p2p_station_reply_without_tu: 'R R {OTHER_CALL_REAL} {OTHER_CALL_REAL} MY REF {PARK_REF} {PARK_REF} 73 {TX_PROSIGN}'
+    p2p_station_reply_with_tu: 'R R {OTHER_CALL_REAL} {OTHER_CALL_REAL} MY REF {PARK_REF} {PARK_REF} TU 73 {TX_PROSIGN}'
+
+  s5:
+    with_prosign:
+      - '^.*{PROSIGN}.*73.*EE.*$'
+    with_prosign_allow_tu:
+      - '^.*{PROSIGN}.*TU.*73.*EE.*$'
+    without_prosign:
+      - '^.*73.*EE.*$'
+    without_prosign_allow_tu:
+      - '^.*TU.*73.*EE.*$'
+    p2p_with_prosign:
+      - '^.*{PROSIGN}.*{OTHER_CALL_REAL}.*{MY_CALL}.*MY.*REF.*{MY_PARK_REF}.*{MY_PARK_REF}.*$'
+    p2p_with_prosign_allow_tu:
+      - '^.*{PROSIGN}.*{OTHER_CALL_REAL}.*{MY_CALL}.*MY.*REF.*{MY_PARK_REF}.*{MY_PARK_REF}.*TU.*73.*{PROSIGN}.*$'
+    p2p_without_prosign:
+      - '^.*{OTHER_CALL_REAL}.*{MY_CALL}.*MY.*REF.*{MY_PARK_REF}.*{MY_PARK_REF}.*$'
+    p2p_without_prosign_allow_tu:
+      - '^.*{OTHER_CALL_REAL}.*{MY_CALL}.*MY.*REF.*{MY_PARK_REF}.*{MY_PARK_REF}.*TU.*73.*$'

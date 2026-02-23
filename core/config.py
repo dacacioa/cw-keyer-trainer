@@ -45,6 +45,7 @@ def load_config(path: str | Path) -> AppConfig:
     _apply_dataclass_updates(cfg.encoder, encoder_raw)
     _apply_dataclass_updates(cfg.qso, raw.get("qso", {}))
     cfg.qso.max_stations = max(1, int(cfg.qso.max_stations))
+    cfg.qso.p2p_probability = max(0.0, min(1.0, float(cfg.qso.p2p_probability)))
 
     # Backward compatibility: old configs only had fixed wpm/tone_hz.
     has_wpm_start = "wpm_out_start" in encoder_raw

@@ -24,6 +24,7 @@ from core.callsign_pool import load_callsigns_file
 from core.decoder import CWDecoder
 from core.encoder import CWEncoder
 from core.iambic_keyer import IambicAKeyer, IambicAKeyerConfig
+from core.park_pool import load_active_park_refs_file
 from core.qso_state_machine import QSOStateMachine
 
 try:
@@ -47,8 +48,10 @@ else:  # pragma: no cover - fallback for non-GUI modes
 
 LOCAL_CALLS_DIR = Path("data")
 LOCAL_CALLS_FILENAME = "other_calls.csv"
+LOCAL_PARKS_FILENAME = "all_parks_ext.csv"
 UI_TIMER_MS = 20
 KEYBOARD_TIMER_MS = 5
+POST_TX_GUARD_SEC = 0.18
 LEFT_CTRL_NATIVE_VKEYS = {0xA2}
 RIGHT_CTRL_NATIVE_VKEYS = {0xA3}
 LEFT_CTRL_NATIVE_SCANCODES = {29, 37}
@@ -562,6 +565,33 @@ def _load_dynamic_calls_from_config(
     return True
 
 
+def _load_active_parks_from_config(
+    state_machine: QSOStateMachine,
+    cfg: AppConfig,
+    log_fn,
+) -> bool:
+    path_str = (cfg.qso.parks_file or "").strip()
+    used_default = False
+    if path_str:
+        p = Path(path_str)
+    else:
+        p = LOCAL_CALLS_DIR / LOCAL_PARKS_FILENAME
+        used_default = True
+    if not p.exists():
+        if used_default:
+            log_fn(f"Default parks file not found: {p}")
+        else:
+            log_fn(f"Parks file not found: {p}")
+        return False
+
+    refs = load_active_park_refs_file(p)
+    state_machine.set_park_ref_pool(refs, str(p))
+    if used_default:
+        cfg.qso.parks_file = str(p)
+    log_fn(f"Active parks loaded: {len(refs)} from {p}")
+    return True
+
+
 def _print_devices_cli() -> int:
     ins, outs = list_audio_devices()
     print("Input devices:")
@@ -576,6 +606,7 @@ def _print_devices_cli() -> int:
 def _run_simulation_cli(cfg: AppConfig, cfg_path: Path) -> int:
     state_machine = QSOStateMachine(cfg.qso)
     _load_dynamic_calls_from_config(state_machine, cfg, print)
+    _load_active_parks_from_config(state_machine, cfg, print)
     print("Simulation mode (stdin). Commands: /reset /export /quit")
     while True:
         try:
@@ -825,6 +856,7 @@ class PotaTrainerWindow(MainWindowBase):
         self.cq_mode_group.addButton(self.cq_pota_cb, 1)
         self.cq_mode_group.addButton(self.cq_sota_cb, 2)
         self.cq_pota_cb.setChecked(True)
+        self.my_park_ref_edit = QtWidgets.QLineEdit()
         self.prosign_edit = QtWidgets.QLineEdit()
         self.wpm_target_spin = QtWidgets.QDoubleSpinBox()
         self.wpm_target_spin.setRange(5.0, 60.0)
@@ -868,6 +900,7 @@ class PotaTrainerWindow(MainWindowBase):
         self.allow_tu_cb = QtWidgets.QCheckBox("Allow TU")
         self.use_prosigns_cb = QtWidgets.QCheckBox("Use Prosigns")
         self.incoming_prob_combo = QtWidgets.QComboBox()
+        self.p2p_prob_combo = QtWidgets.QComboBox()
         self.max_stations_spin = QtWidgets.QSpinBox()
         self.max_stations_spin.setRange(1, 30)
         self.decoder_preset_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
@@ -879,10 +912,12 @@ class PotaTrainerWindow(MainWindowBase):
         self.decoder_preset_label = QtWidgets.QLabel("Normal")
         for pct in (0, 25, 50, 75, 100):
             self.incoming_prob_combo.addItem(f"{pct} %", pct)
+            self.p2p_prob_combo.addItem(f"{pct} %", pct)
         self.apply_button = QtWidgets.QPushButton("Apply Settings")
 
         # Keep settings compact and aligned in the top panel.
         self.my_call_edit.setMaximumWidth(140)
+        self.my_park_ref_edit.setMaximumWidth(130)
         self.prosign_edit.setMaximumWidth(80)
         for spin in (
             self.wpm_target_spin,
@@ -900,6 +935,7 @@ class PotaTrainerWindow(MainWindowBase):
         ):
             spin.setMaximumWidth(90)
         self.incoming_prob_combo.setMaximumWidth(100)
+        self.p2p_prob_combo.setMaximumWidth(100)
         self.max_stations_spin.setMaximumWidth(90)
 
         cq_mode_row = QtWidgets.QHBoxLayout()
@@ -913,50 +949,59 @@ class PotaTrainerWindow(MainWindowBase):
         options_row.addWidget(self.use_prosigns_cb)
         options_row.setContentsMargins(0, 0, 0, 0)
 
-        settings_grid.addWidget(QtWidgets.QLabel("my_call"), 0, 0)
+        def _settings_label(text: str) -> QtWidgets.QLabel:
+            lbl = QtWidgets.QLabel(text)
+            lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            return lbl
+
+        settings_grid.addWidget(_settings_label("my_call"), 0, 0)
         settings_grid.addWidget(self.my_call_edit, 0, 1)
-        settings_grid.addWidget(QtWidgets.QLabel("prosign"), 0, 2)
+        settings_grid.addWidget(_settings_label("prosign"), 0, 2)
         settings_grid.addWidget(self.prosign_edit, 0, 3)
-        settings_grid.addWidget(QtWidgets.QLabel("cq_mode"), 0, 4)
+        settings_grid.addWidget(_settings_label("cq_mode"), 0, 4)
         settings_grid.addLayout(cq_mode_row, 0, 5, 1, 2)
 
-        settings_grid.addWidget(QtWidgets.QLabel("wpm_target"), 1, 0)
+        settings_grid.addWidget(_settings_label("wpm_target"), 1, 0)
         settings_grid.addWidget(self.wpm_target_spin, 1, 1)
-        settings_grid.addWidget(QtWidgets.QLabel("wpm_out_start"), 1, 2)
+        settings_grid.addWidget(_settings_label("wpm_out_start"), 1, 2)
         settings_grid.addWidget(self.wpm_tx_start_spin, 1, 3)
-        settings_grid.addWidget(QtWidgets.QLabel("wpm_out_end"), 1, 4)
+        settings_grid.addWidget(_settings_label("wpm_out_end"), 1, 4)
         settings_grid.addWidget(self.wpm_tx_end_spin, 1, 5)
 
-        settings_grid.addWidget(QtWidgets.QLabel("tone_hz_rx"), 2, 0)
+        settings_grid.addWidget(_settings_label("tone_hz_rx"), 2, 0)
         settings_grid.addWidget(self.tone_rx_spin, 2, 1)
-        settings_grid.addWidget(QtWidgets.QLabel("tone_hz_out_start"), 2, 2)
+        settings_grid.addWidget(_settings_label("tone_hz_out_start"), 2, 2)
         settings_grid.addWidget(self.tone_tx_start_spin, 2, 3)
-        settings_grid.addWidget(QtWidgets.QLabel("tone_hz_out_end"), 2, 4)
+        settings_grid.addWidget(_settings_label("tone_hz_out_end"), 2, 4)
         settings_grid.addWidget(self.tone_tx_end_spin, 2, 5)
 
-        settings_grid.addWidget(QtWidgets.QLabel("threshold_on"), 3, 0)
+        settings_grid.addWidget(_settings_label("threshold_on"), 3, 0)
         settings_grid.addWidget(self.th_on_spin, 3, 1)
-        settings_grid.addWidget(QtWidgets.QLabel("threshold_off"), 3, 2)
+        settings_grid.addWidget(_settings_label("threshold_off"), 3, 2)
         settings_grid.addWidget(self.th_off_spin, 3, 3)
-        settings_grid.addWidget(QtWidgets.QLabel("power_smooth"), 3, 4)
+        settings_grid.addWidget(_settings_label("power_smooth"), 3, 4)
         settings_grid.addWidget(self.power_smooth_spin, 3, 5)
 
-        settings_grid.addWidget(QtWidgets.QLabel("gap_char_dots"), 4, 0)
+        settings_grid.addWidget(_settings_label("gap_char_dots"), 4, 0)
         settings_grid.addWidget(self.gap_char_spin, 4, 1)
-        settings_grid.addWidget(QtWidgets.QLabel("min_up_ratio"), 4, 2)
+        settings_grid.addWidget(_settings_label("min_up_ratio"), 4, 2)
         settings_grid.addWidget(self.min_up_ratio_spin, 4, 3)
         settings_grid.addLayout(options_row, 4, 4, 1, 2)
-        settings_grid.addWidget(QtWidgets.QLabel("incoming_%"), 5, 0)
+        settings_grid.addWidget(_settings_label("incoming_%"), 5, 0)
         settings_grid.addWidget(self.incoming_prob_combo, 5, 1)
-        settings_grid.addWidget(QtWidgets.QLabel("message_gap_s"), 5, 2)
-        settings_grid.addWidget(self.message_gap_sec_spin, 5, 3)
-        settings_grid.addWidget(QtWidgets.QLabel("max_stations"), 5, 4)
+        settings_grid.addWidget(_settings_label("p2p_%"), 5, 2)
+        settings_grid.addWidget(self.p2p_prob_combo, 5, 3)
+        settings_grid.addWidget(_settings_label("max_stations"), 5, 4)
         settings_grid.addWidget(self.max_stations_spin, 5, 5)
-        settings_grid.addWidget(QtWidgets.QLabel("preset_decoder"), 6, 0)
-        settings_grid.addWidget(self.decoder_preset_slider, 6, 1, 1, 4)
-        settings_grid.addWidget(self.decoder_preset_label, 6, 5)
+        settings_grid.addWidget(_settings_label("message_gap_s"), 6, 0)
+        settings_grid.addWidget(self.message_gap_sec_spin, 6, 1)
+        settings_grid.addWidget(_settings_label("my_park_ref"), 6, 2)
+        settings_grid.addWidget(self.my_park_ref_edit, 6, 3)
+        settings_grid.addWidget(_settings_label("preset_decoder"), 7, 0)
+        settings_grid.addWidget(self.decoder_preset_slider, 7, 1, 1, 4)
+        settings_grid.addWidget(self.decoder_preset_label, 7, 5)
 
-        settings_grid.addWidget(self.apply_button, 7, 0, 1, 7)
+        settings_grid.addWidget(self.apply_button, 8, 0, 1, 7)
         right_col.addWidget(settings_box, 1)
 
         log_toggle_row = QtWidgets.QHBoxLayout()
@@ -1025,6 +1070,7 @@ class PotaTrainerWindow(MainWindowBase):
 
     def _sync_widgets_from_config(self) -> None:
         self.my_call_edit.setText(self.cfg.qso.my_call)
+        self.my_park_ref_edit.setText(self.cfg.qso.my_park_ref)
         self._set_cq_mode_widget(self.cfg.qso.cq_mode)
         self.prosign_edit.setText(self.cfg.qso.prosign_literal)
         self.wpm_target_spin.setValue(self.cfg.decoder.wpm_target)
@@ -1051,9 +1097,12 @@ class PotaTrainerWindow(MainWindowBase):
             incoming_pct = int(
                 round(max(0.0, min(1.0, float(self.cfg.qso.auto_incoming_probability))) * 100.0)
             )
+        p2p_pct = int(round(max(0.0, min(1.0, float(self.cfg.qso.p2p_probability))) * 100.0))
         allowed = (0, 25, 50, 75, 100)
         incoming_pct = min(allowed, key=lambda v: abs(v - incoming_pct))
+        p2p_pct = min(allowed, key=lambda v: abs(v - p2p_pct))
         self._set_combo_by_value(self.incoming_prob_combo, incoming_pct)
+        self._set_combo_by_value(self.p2p_prob_combo, p2p_pct)
         self.auto_wpm_cb.setChecked(self.cfg.decoder.auto_wpm)
         self.auto_tone_cb.setChecked(self.cfg.decoder.auto_tone)
         self._sync_decoder_preset_widget()
@@ -1071,6 +1120,13 @@ class PotaTrainerWindow(MainWindowBase):
         if loaded and not path_before and path_after:
             save_config(self.cfg_path, self.cfg)
             self._log(f"Default calls file persisted: {path_after}")
+
+        parks_before = (self.cfg.qso.parks_file or "").strip()
+        parks_loaded = _load_active_parks_from_config(self.state_machine, self.cfg, self._log)
+        parks_after = (self.cfg.qso.parks_file or "").strip()
+        if parks_loaded and not parks_before and parks_after:
+            save_config(self.cfg_path, self.cfg)
+            self._log(f"Default parks file persisted: {parks_after}")
 
     def _refresh_calls_file_status(self) -> None:
         path = self.cfg.qso.other_calls_file or "(none)"
@@ -1229,7 +1285,7 @@ class PotaTrainerWindow(MainWindowBase):
             return None
         return call
 
-    def _queue_tx(self, reply: str, station_call: Optional[str], delay_sec: float = 0.0) -> None:
+    def _queue_tx(self, reply: str, station_call: Optional[str], delay_sec: float = 0.0) -> float:
         tx_call = station_call.strip().upper() if station_call else ""
         wpm = None
         tone_hz = None
@@ -1240,6 +1296,16 @@ class PotaTrainerWindow(MainWindowBase):
             self.cfg.encoder.tone_hz = tone_hz
             self.encoder.config.wpm = wpm
             self.encoder.config.tone_hz = tone_hz
+        duration_sec = 0.0
+        try:
+            if tx_call and wpm is not None and tone_hz is not None:
+                rendered = self._render_station_reply_audio(reply, wpm=wpm, tone_hz=tone_hz)
+            else:
+                rendered = self.encoder.encode_to_audio(reply)
+            sr = float(max(int(self.encoder.config.sample_rate), 1))
+            duration_sec = float(rendered.size) / sr
+        except Exception:
+            duration_sec = 0.0
         self.last_tx = reply
         if delay_sec > 0.0:
             self._log(f"TX(+{delay_sec:.2f}s) {reply}")
@@ -1247,23 +1313,32 @@ class PotaTrainerWindow(MainWindowBase):
             self._log(f"TX {reply}")
         if self.output_worker:
             self.output_worker.enqueue(reply, wpm=wpm, tone_hz=tone_hz, delay_sec=delay_sec)
+        return duration_sec
 
     def _render_station_reply_audio(self, reply: str, wpm: float, tone_hz: float) -> np.ndarray:
         cfg = replace(self.encoder.config, wpm=float(wpm), tone_hz=float(tone_hz))
         return CWEncoder(cfg).encode_to_audio(reply)
 
-    def _queue_parallel_callers(self, block: Sequence[Tuple[str, str, float]]) -> None:
+    def _queue_parallel_callers(
+        self,
+        block: Sequence[Tuple[str, str, float]],
+        *,
+        base_delay_sec: float = 0.0,
+    ) -> float:
         if not block:
-            return
+            return 0.0
         sr = int(self.encoder.config.sample_rate)
         tracks: List[np.ndarray] = []
+        max_end_sec = 0.0
         for reply, call, abs_delay in block:
             wpm, tone_hz = self._get_station_profile(call)
             self._log(f"TX profile in use [{call}]: wpm_out={wpm:.1f}, tone_hz_out={tone_hz:.1f}")
-            delay = max(0.0, float(abs_delay))
+            delay = max(0.0, float(base_delay_sec) + float(abs_delay))
             self.last_tx = reply
             self._log(f"TX(+{delay:.2f}s) {reply}")
             base_audio = self._render_station_reply_audio(reply, wpm=wpm, tone_hz=tone_hz)
+            duration_sec = float(base_audio.size) / float(max(sr, 1))
+            max_end_sec = max(max_end_sec, delay + duration_sec)
             delay_samples = max(int(round(delay * sr)), 0)
             if delay_samples > 0:
                 audio = np.concatenate([np.zeros(delay_samples, dtype=np.float32), base_audio], dtype=np.float32)
@@ -1272,7 +1347,7 @@ class PotaTrainerWindow(MainWindowBase):
             tracks.append(audio)
 
         if not tracks or self.output_worker is None:
-            return
+            return max_end_sec
         max_len = max(track.size for track in tracks)
         mix = np.zeros(max_len, dtype=np.float32)
         for track in tracks:
@@ -1281,6 +1356,7 @@ class PotaTrainerWindow(MainWindowBase):
         if peak > 1.0:
             mix = mix / peak
         self.output_worker.enqueue_audio(mix, delay_sec=0.0)
+        return max_end_sec
 
     def _ensure_audio_pipeline(self) -> None:
         if sd is None:
@@ -1501,6 +1577,7 @@ class PotaTrainerWindow(MainWindowBase):
         for info in result.info:
             self._log(f"INFO {info}")
         i = 0
+        schedule_offset_sec = 0.0
         while i < len(result.replies):
             reply = result.replies[i]
             station_call = self._extract_station_call_from_reply(reply)
@@ -1515,7 +1592,11 @@ class PotaTrainerWindow(MainWindowBase):
                     i += 1
                 abs_delays = [random.uniform(0.0, 2.0) for _ in block]
                 parallel_block = [(r, c, d) for (r, c), d in zip(block, abs_delays)]
-                self._queue_parallel_callers(parallel_block)
+                base_delay = schedule_offset_sec
+                if schedule_offset_sec > 0.0:
+                    base_delay += POST_TX_GUARD_SEC
+                block_end_sec = self._queue_parallel_callers(parallel_block, base_delay_sec=base_delay)
+                schedule_offset_sec = max(schedule_offset_sec, block_end_sec)
                 continue
 
             station_for_reply: Optional[str] = None
@@ -1527,7 +1608,12 @@ class PotaTrainerWindow(MainWindowBase):
                 # If station selection and report happen in the same RX message,
                 # the active station can change within this process_text cycle.
                 station_for_reply = active_after or active_before
-            self._queue_tx(reply, station_call=station_for_reply, delay_sec=0.0)
+            duration_sec = self._queue_tx(
+                reply,
+                station_call=station_for_reply,
+                delay_sec=schedule_offset_sec,
+            )
+            schedule_offset_sec += max(0.0, duration_sec)
             i += 1
 
     def _on_run(self) -> None:
@@ -1799,6 +1885,7 @@ class PotaTrainerWindow(MainWindowBase):
         mode = str(self.input_mode_combo.currentData() or "audio").strip().lower()
         self.cfg.audio.input_mode = mode if mode in {"audio", "keyboard"} else "audio"
         self.cfg.qso.my_call = self.my_call_edit.text().strip().upper() or self.cfg.qso.my_call
+        self.cfg.qso.my_park_ref = self.my_park_ref_edit.text().strip().upper() or self.cfg.qso.my_park_ref
         self.cfg.qso.cq_mode = self._get_cq_mode_widget()
         self.cfg.qso.prosign_literal = self.prosign_edit.text().strip().upper() or "CAVE"
         self.cfg.qso.allow_599 = self.allow_599_cb.isChecked()
@@ -1806,8 +1893,10 @@ class PotaTrainerWindow(MainWindowBase):
         self.cfg.qso.use_prosigns = self.use_prosigns_cb.isChecked()
         self.cfg.qso.max_stations = int(self.max_stations_spin.value())
         incoming_pct = int(self.incoming_prob_combo.currentData() or 0)
+        p2p_pct = int(self.p2p_prob_combo.currentData() or 0)
         self.cfg.qso.auto_incoming_after_qso = incoming_pct > 0
         self.cfg.qso.auto_incoming_probability = float(incoming_pct) / 100.0
+        self.cfg.qso.p2p_probability = float(p2p_pct) / 100.0
 
         self.cfg.decoder.wpm_target = float(self.wpm_target_spin.value())
         self.cfg.decoder.target_tone_hz = float(self.tone_rx_spin.value())
@@ -1853,6 +1942,7 @@ class PotaTrainerWindow(MainWindowBase):
 
         sm_cfg = self.state_machine.config
         sm_cfg.my_call = self.cfg.qso.my_call
+        sm_cfg.my_park_ref = self.cfg.qso.my_park_ref
         sm_cfg.other_call = self.cfg.qso.other_call
         sm_cfg.cq_mode = self.cfg.qso.cq_mode
         sm_cfg.prosign_literal = self.cfg.qso.prosign_literal
@@ -1862,12 +1952,14 @@ class PotaTrainerWindow(MainWindowBase):
         sm_cfg.max_stations = self.cfg.qso.max_stations
         sm_cfg.auto_incoming_after_qso = self.cfg.qso.auto_incoming_after_qso
         sm_cfg.auto_incoming_probability = self.cfg.qso.auto_incoming_probability
+        sm_cfg.p2p_probability = self.cfg.qso.p2p_probability
 
         save_config(self.cfg_path, self.cfg)
         self._refresh_calls_file_status()
         self._refresh_input_mode_controls()
         self._log(
             f"Settings applied. mode={self.cfg.audio.input_mode}, incoming_call={incoming_pct}% "
+            f"p2p={p2p_pct}%, "
             f"(enabled={self.cfg.qso.auto_incoming_after_qso}), "
             f"wpm_out_range={self.cfg.encoder.wpm_out_start:.1f}-{self.cfg.encoder.wpm_out_end:.1f}, "
             f"tone_hz_out_range={self.cfg.encoder.tone_hz_out_start:.1f}-{self.cfg.encoder.tone_hz_out_end:.1f}, "
@@ -1995,9 +2087,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--input-device", type=int, default=None, help="Input device index.")
     p.add_argument("--output-device", type=int, default=None, help="Output device index.")
     p.add_argument("--my-call", default=None, help="My callsign.")
+    p.add_argument("--my-park-ref", default=None, help="My park reference for P2P exchange.")
     p.add_argument("--other-call", default=None, help="Other station callsign.")
     p.add_argument("--cq-mode", choices=["SIMPLE", "POTA", "SOTA"], default=None, help="CQ mode keyword.")
     p.add_argument("--other-calls-file", default=None, help="Path to dynamic callsign file.")
+    p.add_argument("--parks-file", default=None, help="Path to park references CSV file.")
     p.add_argument("--wpm-target", type=float, default=None, help="Decoder target WPM.")
     p.add_argument("--wpm-out", type=float, default=None, help="Encoder output WPM.")
     p.add_argument("--wpm-out-start", type=float, default=None, help="TX WPM range start.")
@@ -2012,6 +2106,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--auto-tone", action="store_true", help="Force auto tone tracking on.")
     p.add_argument("--fixed-tone", action="store_true", help="Force fixed RX tone mode.")
     p.add_argument("--max-stations", type=int, default=None, help="Max incoming stations after each CQ.")
+    p.add_argument("--p2p-percent", type=int, default=None, help="P2P probability in percent (0-100).")
     p.add_argument("--allow-599", action="store_true", help="Accept 599 variants.")
     p.add_argument("--allow-tu", action="store_true", help="Accept optional TU.")
     p.add_argument("--disable-prosigns", action="store_true", help="Disable prosign requirement/replies.")
@@ -2029,12 +2124,16 @@ def _apply_cli_overrides(cfg: AppConfig, args: argparse.Namespace) -> None:
         cfg.audio.output_device = args.output_device
     if args.my_call:
         cfg.qso.my_call = args.my_call.upper()
+    if args.my_park_ref:
+        cfg.qso.my_park_ref = args.my_park_ref.upper()
     if args.other_call:
         cfg.qso.other_call = args.other_call.upper()
     if args.cq_mode:
         cfg.qso.cq_mode = args.cq_mode.upper()
     if args.other_calls_file:
         cfg.qso.other_calls_file = args.other_calls_file
+    if args.parks_file:
+        cfg.qso.parks_file = args.parks_file
     if args.wpm_target is not None:
         cfg.decoder.wpm_target = args.wpm_target
     if args.wpm_out is not None:
@@ -2067,6 +2166,9 @@ def _apply_cli_overrides(cfg: AppConfig, args: argparse.Namespace) -> None:
         cfg.decoder.auto_tone = False
     if args.max_stations is not None:
         cfg.qso.max_stations = max(1, int(args.max_stations))
+    if args.p2p_percent is not None:
+        pct = max(0, min(100, int(args.p2p_percent)))
+        cfg.qso.p2p_probability = float(pct) / 100.0
     if args.allow_599:
         cfg.qso.allow_599 = True
     if args.allow_tu:

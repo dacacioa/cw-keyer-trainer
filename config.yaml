@@ -1,14 +1,14 @@
 audio:
   sample_rate: 48000
   input_device: 3
-  output_device: 9
+  output_device: 10
   blocksize: 1024
   channels: 1
-  input_mode: keyboard
+  input_mode: audio
 decoder:
   sample_rate: 48000
   frame_ms: 10.0
-  target_tone_hz: 620.0
+  target_tone_hz: 600.0
   auto_tone: false
   tone_search_min_hz: 300.0
   tone_search_max_hz: 1200.0
@@ -32,8 +32,8 @@ decoder:
   prosign_literal: BK
 encoder:
   sample_rate: 48000
-  tone_hz: 595.8
-  wpm: 20.3
+  tone_hz: 580.4
+  wpm: 23.4
   wpm_out_start: 18.0
   wpm_out_end: 25.0
   tone_hz_out_start: 575.0
@@ -48,10 +48,14 @@ qso:
   my_call: EA3IPX
   other_call: N1MM
   cq_mode: SIMPLE
-  max_stations: 2
+  max_stations: 1
   other_calls_file: data\other_calls.csv
+  parks_file: data\all_parks_ext.csv
+  exchange_patterns_file: data\exchange_patterns.yaml
   auto_incoming_after_qso: true
-  auto_incoming_probability: 0.5
+  auto_incoming_probability: 0.75
+  p2p_probability: 0.25
+  my_park_ref: EA-0012
   allow_599: false
   allow_tu: false
   use_prosigns: true
