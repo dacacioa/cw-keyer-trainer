@@ -122,6 +122,7 @@ Parametros en settings:
 - `cq_mode` (`Simple` / `POTA` / `SOTA`, exclusivo)
 - `prosign` + `Use Prosigns`
 - `wpm_target` (RX), `wpm_out_start` y `wpm_out_end` (TX aleatorio por QSO)
+- `farnsworth_wpm` (TX efectivo; boton `ON/OFF`, en `OFF` se fuerza a `0`)
 - `tone_hz_rx`, `tone_hz_out_start` y `tone_hz_out_end` (TX aleatorio por QSO)
 - `threshold_on`, `threshold_off`
 - `power_smooth`, `gap_char_dots`, `min_up_ratio`
@@ -273,6 +274,7 @@ Comandos:
 - `--parks-file`
 - `--wpm-target`, `--wpm-out`
 - `--wpm-out-start`, `--wpm-out-end`
+- `--farnsworth-wpm` (`0` desactiva Farnsworth)
 - `--tone-hz`, `--tone-out-hz`
 - `--tone-out-start-hz`, `--tone-out-end-hz`
 - `--message-gap-sec`

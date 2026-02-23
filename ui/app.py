@@ -890,6 +890,15 @@ class PotaTrainerWindow(MainWindowBase):
         self.wpm_tx_end_spin = QtWidgets.QDoubleSpinBox()
         self.wpm_tx_end_spin.setRange(5.0, 60.0)
         self.wpm_tx_end_spin.setDecimals(1)
+        self.farnsworth_wpm_spin = QtWidgets.QDoubleSpinBox()
+        self.farnsworth_wpm_spin.setRange(0.0, 60.0)
+        self.farnsworth_wpm_spin.setDecimals(1)
+        self.farnsworth_wpm_spin.setSingleStep(0.5)
+        self.farnsworth_wpm_spin.setSpecialValueText("OFF")
+        self.farnsworth_toggle_button = QtWidgets.QPushButton("OFF")
+        self.farnsworth_toggle_button.setCheckable(True)
+        self.farnsworth_toggle_button.setMaximumWidth(64)
+        self._farnsworth_last_nonzero = 10.0
         self.tone_tx_start_spin = QtWidgets.QDoubleSpinBox()
         self.tone_tx_start_spin.setRange(300.0, 2000.0)
         self.tone_tx_start_spin.setDecimals(1)
@@ -930,6 +939,7 @@ class PotaTrainerWindow(MainWindowBase):
             self.message_gap_sec_spin,
             self.wpm_tx_start_spin,
             self.wpm_tx_end_spin,
+            self.farnsworth_wpm_spin,
             self.tone_tx_start_spin,
             self.tone_tx_end_spin,
         ):
@@ -967,36 +977,44 @@ class PotaTrainerWindow(MainWindowBase):
         settings_grid.addWidget(self.wpm_tx_start_spin, 1, 3)
         settings_grid.addWidget(_settings_label("wpm_out_end"), 1, 4)
         settings_grid.addWidget(self.wpm_tx_end_spin, 1, 5)
+        settings_grid.addWidget(_settings_label("farnsworth_wpm"), 2, 0)
+        farnsworth_row = QtWidgets.QHBoxLayout()
+        farnsworth_row.setContentsMargins(0, 0, 0, 0)
+        farnsworth_row.setSpacing(4)
+        farnsworth_row.addWidget(self.farnsworth_wpm_spin)
+        farnsworth_row.addWidget(self.farnsworth_toggle_button)
+        farnsworth_row.addStretch(1)
+        settings_grid.addLayout(farnsworth_row, 2, 1)
 
-        settings_grid.addWidget(_settings_label("tone_hz_rx"), 2, 0)
-        settings_grid.addWidget(self.tone_rx_spin, 2, 1)
-        settings_grid.addWidget(_settings_label("tone_hz_out_start"), 2, 2)
-        settings_grid.addWidget(self.tone_tx_start_spin, 2, 3)
-        settings_grid.addWidget(_settings_label("tone_hz_out_end"), 2, 4)
-        settings_grid.addWidget(self.tone_tx_end_spin, 2, 5)
+        settings_grid.addWidget(_settings_label("tone_hz_rx"), 2, 2)
+        settings_grid.addWidget(self.tone_rx_spin, 2, 3)
+        settings_grid.addWidget(_settings_label("tone_hz_out_start"), 2, 4)
+        settings_grid.addWidget(self.tone_tx_start_spin, 2, 5)
+        settings_grid.addWidget(_settings_label("tone_hz_out_end"), 3, 0)
+        settings_grid.addWidget(self.tone_tx_end_spin, 3, 1)
 
-        settings_grid.addWidget(_settings_label("threshold_on"), 3, 0)
-        settings_grid.addWidget(self.th_on_spin, 3, 1)
-        settings_grid.addWidget(_settings_label("threshold_off"), 3, 2)
-        settings_grid.addWidget(self.th_off_spin, 3, 3)
-        settings_grid.addWidget(_settings_label("power_smooth"), 3, 4)
-        settings_grid.addWidget(self.power_smooth_spin, 3, 5)
+        settings_grid.addWidget(_settings_label("threshold_on"), 3, 2)
+        settings_grid.addWidget(self.th_on_spin, 3, 3)
+        settings_grid.addWidget(_settings_label("threshold_off"), 3, 4)
+        settings_grid.addWidget(self.th_off_spin, 3, 5)
+        settings_grid.addWidget(_settings_label("power_smooth"), 4, 0)
+        settings_grid.addWidget(self.power_smooth_spin, 4, 1)
 
-        settings_grid.addWidget(_settings_label("gap_char_dots"), 4, 0)
-        settings_grid.addWidget(self.gap_char_spin, 4, 1)
-        settings_grid.addWidget(_settings_label("min_up_ratio"), 4, 2)
-        settings_grid.addWidget(self.min_up_ratio_spin, 4, 3)
-        settings_grid.addLayout(options_row, 4, 4, 1, 2)
+        settings_grid.addWidget(_settings_label("gap_char_dots"), 4, 2)
+        settings_grid.addWidget(self.gap_char_spin, 4, 3)
+        settings_grid.addWidget(_settings_label("min_up_ratio"), 4, 4)
+        settings_grid.addWidget(self.min_up_ratio_spin, 4, 5)
+        settings_grid.addLayout(options_row, 5, 4, 1, 2)
         settings_grid.addWidget(_settings_label("incoming_%"), 5, 0)
         settings_grid.addWidget(self.incoming_prob_combo, 5, 1)
         settings_grid.addWidget(_settings_label("p2p_%"), 5, 2)
         settings_grid.addWidget(self.p2p_prob_combo, 5, 3)
-        settings_grid.addWidget(_settings_label("max_stations"), 5, 4)
-        settings_grid.addWidget(self.max_stations_spin, 5, 5)
-        settings_grid.addWidget(_settings_label("message_gap_s"), 6, 0)
-        settings_grid.addWidget(self.message_gap_sec_spin, 6, 1)
-        settings_grid.addWidget(_settings_label("my_park_ref"), 6, 2)
-        settings_grid.addWidget(self.my_park_ref_edit, 6, 3)
+        settings_grid.addWidget(_settings_label("max_stations"), 6, 0)
+        settings_grid.addWidget(self.max_stations_spin, 6, 1)
+        settings_grid.addWidget(_settings_label("message_gap_s"), 6, 2)
+        settings_grid.addWidget(self.message_gap_sec_spin, 6, 3)
+        settings_grid.addWidget(_settings_label("my_park_ref"), 6, 4)
+        settings_grid.addWidget(self.my_park_ref_edit, 6, 5)
         settings_grid.addWidget(_settings_label("preset_decoder"), 7, 0)
         settings_grid.addWidget(self.decoder_preset_slider, 7, 1, 1, 4)
         settings_grid.addWidget(self.decoder_preset_label, 7, 5)
@@ -1047,6 +1065,7 @@ class PotaTrainerWindow(MainWindowBase):
         self.input_combo.currentIndexChanged.connect(self._on_input_changed)
         self.output_combo.currentIndexChanged.connect(self._on_output_changed)
         self.decoder_preset_slider.valueChanged.connect(self._on_decoder_preset_changed)
+        self.farnsworth_toggle_button.toggled.connect(self._on_farnsworth_toggled)
         self.apply_button.clicked.connect(self._on_apply_settings)
         self.clear_decoded_button.clicked.connect(self._on_clear_decoding)
         self.decoding_font_size_spin.valueChanged.connect(self._on_decoding_font_size_changed)
@@ -1086,6 +1105,14 @@ class PotaTrainerWindow(MainWindowBase):
             self.message_gap_sec_spin.setValue(self.cfg.decoder.message_gap_dots * self.cfg.decoder.dot_seconds_fixed)
         self.wpm_tx_start_spin.setValue(self.cfg.encoder.wpm_out_start)
         self.wpm_tx_end_spin.setValue(self.cfg.encoder.wpm_out_end)
+        farnsworth = float(self.cfg.encoder.farnsworth_wpm or 0.0)
+        if farnsworth > 0.0:
+            self._farnsworth_last_nonzero = farnsworth
+        self.farnsworth_wpm_spin.setValue(farnsworth)
+        self.farnsworth_toggle_button.blockSignals(True)
+        self.farnsworth_toggle_button.setChecked(farnsworth > 0.0)
+        self.farnsworth_toggle_button.blockSignals(False)
+        self._set_farnsworth_enabled_ui(farnsworth > 0.0)
         self.tone_tx_start_spin.setValue(self.cfg.encoder.tone_hz_out_start)
         self.tone_tx_end_spin.setValue(self.cfg.encoder.tone_hz_out_end)
         self.allow_599_cb.setChecked(self.cfg.qso.allow_599)
@@ -1881,6 +1908,22 @@ class PotaTrainerWindow(MainWindowBase):
         self.logs_toggle_button.setText("Log")
         self.text_splitter.setSizes([1, 0])
 
+    def _set_farnsworth_enabled_ui(self, enabled: bool) -> None:
+        self.farnsworth_toggle_button.setText("ON" if enabled else "OFF")
+        self.farnsworth_wpm_spin.setEnabled(enabled)
+
+    def _on_farnsworth_toggled(self, enabled: bool) -> None:
+        self._set_farnsworth_enabled_ui(bool(enabled))
+        if enabled:
+            if float(self.farnsworth_wpm_spin.value()) <= 0.0:
+                self.farnsworth_wpm_spin.setValue(float(self._farnsworth_last_nonzero))
+            return
+
+        current = float(self.farnsworth_wpm_spin.value())
+        if current > 0.0:
+            self._farnsworth_last_nonzero = current
+        self.farnsworth_wpm_spin.setValue(0.0)
+
     def _on_apply_settings(self) -> None:
         mode = str(self.input_mode_combo.currentData() or "audio").strip().lower()
         self.cfg.audio.input_mode = mode if mode in {"audio", "keyboard"} else "audio"
@@ -1917,6 +1960,14 @@ class PotaTrainerWindow(MainWindowBase):
 
         self.cfg.encoder.wpm_out_start = float(self.wpm_tx_start_spin.value())
         self.cfg.encoder.wpm_out_end = float(self.wpm_tx_end_spin.value())
+        if self.farnsworth_toggle_button.isChecked():
+            fwpm = float(self.farnsworth_wpm_spin.value())
+            if fwpm > 0.0:
+                self._farnsworth_last_nonzero = fwpm
+        else:
+            fwpm = 0.0
+            self.farnsworth_wpm_spin.setValue(0.0)
+        self.cfg.encoder.farnsworth_wpm = fwpm if fwpm > 0.0 else None
         self.cfg.encoder.tone_hz_out_start = float(self.tone_tx_start_spin.value())
         self.cfg.encoder.tone_hz_out_end = float(self.tone_tx_end_spin.value())
         self._normalize_tx_ranges()
@@ -1929,6 +1980,7 @@ class PotaTrainerWindow(MainWindowBase):
 
         self.decoder = CWDecoder(self.cfg.decoder)
         self.encoder.config.wpm = self.cfg.encoder.wpm
+        self.encoder.config.farnsworth_wpm = self.cfg.encoder.farnsworth_wpm
         self.encoder.config.tone_hz = self.cfg.encoder.tone_hz
         with self._keyboard_keyer_lock:
             self.keyboard_keyer.config.sample_rate = int(self.cfg.audio.sample_rate)
@@ -1962,6 +2014,7 @@ class PotaTrainerWindow(MainWindowBase):
             f"p2p={p2p_pct}%, "
             f"(enabled={self.cfg.qso.auto_incoming_after_qso}), "
             f"wpm_out_range={self.cfg.encoder.wpm_out_start:.1f}-{self.cfg.encoder.wpm_out_end:.1f}, "
+            f"farnsworth_wpm={(self.cfg.encoder.farnsworth_wpm if self.cfg.encoder.farnsworth_wpm else 'OFF')}, "
             f"tone_hz_out_range={self.cfg.encoder.tone_hz_out_start:.1f}-{self.cfg.encoder.tone_hz_out_end:.1f}, "
             f"max_stations={self.cfg.qso.max_stations}"
         )
@@ -2096,6 +2149,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--wpm-out", type=float, default=None, help="Encoder output WPM.")
     p.add_argument("--wpm-out-start", type=float, default=None, help="TX WPM range start.")
     p.add_argument("--wpm-out-end", type=float, default=None, help="TX WPM range end.")
+    p.add_argument(
+        "--farnsworth-wpm",
+        type=float,
+        default=None,
+        help="TX Farnsworth effective WPM (0 disables).",
+    )
     p.add_argument("--tone-hz", type=float, default=None, help="RX tone target.")
     p.add_argument("--tone-out-hz", type=float, default=None, help="TX tone.")
     p.add_argument("--tone-out-start-hz", type=float, default=None, help="TX tone range start.")
@@ -2144,6 +2203,9 @@ def _apply_cli_overrides(cfg: AppConfig, args: argparse.Namespace) -> None:
         cfg.encoder.wpm_out_start = args.wpm_out_start
     if args.wpm_out_end is not None:
         cfg.encoder.wpm_out_end = args.wpm_out_end
+    if args.farnsworth_wpm is not None:
+        fwpm = max(0.0, float(args.farnsworth_wpm))
+        cfg.encoder.farnsworth_wpm = fwpm if fwpm > 0.0 else None
     if args.message_gap_sec is not None:
         cfg.decoder.message_gap_seconds = args.message_gap_sec
     if args.tone_hz is not None:

@@ -92,6 +92,22 @@ def test_configured_prosign_token_is_sent_contiguous():
     assert not any(abs(d - (3.0 * dot)) < 0.2 * dot for d in off_durations)
 
 
+def test_farnsworth_slows_spacing_but_keeps_character_speed():
+    cfg = CWEncoderConfig(sample_rate=16000, wpm=25.0, farnsworth_wpm=10.0, tone_hz=600.0)
+    enc = CWEncoder(cfg)
+
+    assert abs(cfg.dot_seconds - (1.2 / 25.0)) < 1e-9
+    assert abs(cfg.space_dot_seconds - (1.2 / 10.0)) < 1e-9
+
+    pulses = enc.text_to_pulses("EE")
+    off_durations = [dur for is_on, dur in pulses if not is_on]
+    target_gap = 3.0 * cfg.space_dot_seconds
+    assert any(abs(d - target_gap) < 0.2 * cfg.space_dot_seconds for d in off_durations)
+
+    cfg_no_effect = CWEncoderConfig(sample_rate=16000, wpm=20.0, farnsworth_wpm=25.0, tone_hz=600.0)
+    assert cfg_no_effect.space_dot_seconds == cfg_no_effect.dot_seconds
+
+
 def test_noise_floor_calibration_from_samples_updates_thresholds():
     cfg = CWDecoderConfig(
         sample_rate=16000,

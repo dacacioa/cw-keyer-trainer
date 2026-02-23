@@ -1,7 +1,7 @@
 audio:
   sample_rate: 48000
   input_device: 3
-  output_device: 10
+  output_device: 9
   blocksize: 1024
   channels: 1
   input_mode: audio
@@ -32,13 +32,13 @@ decoder:
   prosign_literal: BK
 encoder:
   sample_rate: 48000
-  tone_hz: 580.4
-  wpm: 23.4
+  tone_hz: 575.0
+  wpm: 18.0
   wpm_out_start: 18.0
   wpm_out_end: 25.0
   tone_hz_out_start: 575.0
   tone_hz_out_end: 625.0
-  farnsworth_wpm: null
+  farnsworth_wpm: 13.0
   volume: 0.25
   attack_ms: 4.0
   release_ms: 6.0
