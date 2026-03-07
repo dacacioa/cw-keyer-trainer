@@ -43,7 +43,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path package | Out-Null
           Copy-Item dist/CWKeyTrainer package/ -Recurse
-          if (Test-Path config.yaml) { Copy-Item config.yaml package/ }
+          if (Test-Path config.yaml) { Copy-Item config.yaml package/CWKeyTrainer/ }
+          if (Test-Path data) { Copy-Item data package/CWKeyTrainer/data -Recurse }
           if (Test-Path README.md) { Copy-Item README.md package/ }
           if ("${{ github.event_name }}" -eq "workflow_dispatch") {
             $tag = "${{ inputs.release_tag }}"
