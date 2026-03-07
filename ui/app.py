@@ -25,7 +25,7 @@ from core.decoder import CWDecoder
 from core.encoder import CWEncoder
 from core.iambic_keyer import IambicAKeyer, IambicAKeyerConfig
 from core.park_pool import load_active_park_refs_file
-from core.qso_state_machine import QSOStateMachine
+from core.qso_state_machine import QSOConfig, QSOStateMachine
 
 try:
     import sounddevice as sd
@@ -65,6 +65,45 @@ if sys.platform.startswith("win"):
         _WIN_USER32 = None
 else:
     _WIN_USER32 = None
+
+
+def _app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
+def _resolve_config_path(path_str: Optional[str], base_dir: Path) -> Path:
+    if not path_str:
+        return base_dir / "config.yaml"
+    p = Path(path_str)
+    if p.is_absolute():
+        return p
+    if path_str == "config.yaml":
+        return base_dir / p
+    return p
+
+
+def _resolve_runtime_path(path_str: Optional[str], base_dir: Path) -> Optional[Path]:
+    raw = str(path_str or "").strip()
+    if not raw:
+        return None
+    p = Path(raw)
+    if p.is_absolute():
+        return p
+    cwd_candidate = Path.cwd() / p
+    if cwd_candidate.exists():
+        return cwd_candidate
+    return base_dir / p
+
+
+def _runtime_qso_config(cfg: QSOConfig, base_dir: Path) -> QSOConfig:
+    runtime_cfg = replace(cfg)
+    for attr in ("other_calls_file", "parks_file", "exchange_patterns_file"):
+        resolved = _resolve_runtime_path(getattr(cfg, attr), base_dir)
+        if resolved is not None:
+            setattr(runtime_cfg, attr, str(resolved))
+    return runtime_cfg
 
 
 class AudioInputWorker:
@@ -541,15 +580,18 @@ def _find_device_position(devices: Sequence[Tuple[int, str]], device_id: Optiona
 def _load_dynamic_calls_from_config(
     state_machine: QSOStateMachine,
     cfg: AppConfig,
+    base_dir: Path,
     log_fn,
 ) -> bool:
     path_str = (cfg.qso.other_calls_file or "").strip()
     used_default = False
     if path_str:
-        p = Path(path_str)
+        p = _resolve_runtime_path(path_str, base_dir)
     else:
-        p = LOCAL_CALLS_DIR / LOCAL_CALLS_FILENAME
+        p = base_dir / LOCAL_CALLS_DIR / LOCAL_CALLS_FILENAME
         used_default = True
+    if p is None:
+        return False
     if not p.exists():
         if used_default:
             log_fn(f"Default calls file not found: {p}")
@@ -568,15 +610,18 @@ def _load_dynamic_calls_from_config(
 def _load_active_parks_from_config(
     state_machine: QSOStateMachine,
     cfg: AppConfig,
+    base_dir: Path,
     log_fn,
 ) -> bool:
     path_str = (cfg.qso.parks_file or "").strip()
     used_default = False
     if path_str:
-        p = Path(path_str)
+        p = _resolve_runtime_path(path_str, base_dir)
     else:
-        p = LOCAL_CALLS_DIR / LOCAL_PARKS_FILENAME
+        p = base_dir / LOCAL_CALLS_DIR / LOCAL_PARKS_FILENAME
         used_default = True
+    if p is None:
+        return False
     if not p.exists():
         if used_default:
             log_fn(f"Default parks file not found: {p}")
@@ -604,9 +649,10 @@ def _print_devices_cli() -> int:
 
 
 def _run_simulation_cli(cfg: AppConfig, cfg_path: Path) -> int:
-    state_machine = QSOStateMachine(cfg.qso)
-    _load_dynamic_calls_from_config(state_machine, cfg, print)
-    _load_active_parks_from_config(state_machine, cfg, print)
+    base_dir = cfg_path.resolve().parent
+    state_machine = QSOStateMachine(_runtime_qso_config(cfg.qso, base_dir))
+    _load_dynamic_calls_from_config(state_machine, cfg, base_dir, print)
+    _load_active_parks_from_config(state_machine, cfg, base_dir, print)
     print("Simulation mode (stdin). Commands: /reset /export /quit")
     while True:
         try:
@@ -680,6 +726,7 @@ class PotaTrainerWindow(MainWindowBase):
         super().__init__()
         self.cfg = cfg
         self.cfg_path = cfg_path
+        self.resource_base_dir = self.cfg_path.resolve().parent
         self.logs_expanded = False
 
         self.decoder = CWDecoder(self.cfg.decoder)
@@ -697,7 +744,7 @@ class PotaTrainerWindow(MainWindowBase):
         self._keyboard_keyer_lock = threading.Lock()
         self._keyboard_audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=256)
         self._sync_encoder_prosign_tokens()
-        self.state_machine = QSOStateMachine(self.cfg.qso)
+        self.state_machine = QSOStateMachine(_runtime_qso_config(self.cfg.qso, self.resource_base_dir))
 
         self.last_decoded = ""
         self.last_tx = ""
@@ -821,6 +868,9 @@ class PotaTrainerWindow(MainWindowBase):
         self.calls_file_label = QtWidgets.QLabel("(none)")
         self.calls_file_label.setWordWrap(True)
         self.calls_pool_label = QtWidgets.QLabel("0")
+        self.parks_file_label = QtWidgets.QLabel("(none)")
+        self.parks_file_label.setWordWrap(True)
+        self.parks_pool_label = QtWidgets.QLabel("0")
         ctrl_grid.addWidget(QtWidgets.QLabel("Mode"), 0, 0)
         ctrl_grid.addWidget(self.input_mode_combo, 0, 1)
         ctrl_grid.addWidget(QtWidgets.QLabel("Input"), 0, 2)
@@ -842,6 +892,10 @@ class PotaTrainerWindow(MainWindowBase):
         ctrl_grid.addWidget(self.calls_file_label, 5, 1, 1, 4)
         ctrl_grid.addWidget(QtWidgets.QLabel("Pool"), 5, 5)
         ctrl_grid.addWidget(self.calls_pool_label, 5, 6)
+        ctrl_grid.addWidget(QtWidgets.QLabel("Parks file"), 6, 0)
+        ctrl_grid.addWidget(self.parks_file_label, 6, 1, 1, 4)
+        ctrl_grid.addWidget(QtWidgets.QLabel("Pool"), 6, 5)
+        ctrl_grid.addWidget(self.parks_pool_label, 6, 6)
         right_col.addWidget(ctrl_box, 0)
 
         settings_box = QtWidgets.QGroupBox("QSO/Decoder/Encoder Settings")
@@ -1142,14 +1196,14 @@ class PotaTrainerWindow(MainWindowBase):
 
     def _load_dynamic_calls_on_startup(self) -> None:
         path_before = (self.cfg.qso.other_calls_file or "").strip()
-        loaded = _load_dynamic_calls_from_config(self.state_machine, self.cfg, self._log)
+        loaded = _load_dynamic_calls_from_config(self.state_machine, self.cfg, self.resource_base_dir, self._log)
         path_after = (self.cfg.qso.other_calls_file or "").strip()
         if loaded and not path_before and path_after:
             save_config(self.cfg_path, self.cfg)
             self._log(f"Default calls file persisted: {path_after}")
 
         parks_before = (self.cfg.qso.parks_file or "").strip()
-        parks_loaded = _load_active_parks_from_config(self.state_machine, self.cfg, self._log)
+        parks_loaded = _load_active_parks_from_config(self.state_machine, self.cfg, self.resource_base_dir, self._log)
         parks_after = (self.cfg.qso.parks_file or "").strip()
         if parks_loaded and not parks_before and parks_after:
             save_config(self.cfg_path, self.cfg)
@@ -1159,10 +1213,14 @@ class PotaTrainerWindow(MainWindowBase):
         path = self.cfg.qso.other_calls_file or "(none)"
         self.calls_file_label.setText(path)
         self.calls_pool_label.setText(str(self.state_machine.other_call_pool_size))
+        parks_path = self.cfg.qso.parks_file or "(none)"
+        self.parks_file_label.setText(parks_path)
+        self.parks_pool_label.setText(str(self.state_machine.park_ref_pool_size))
 
     def _local_calls_file_path(self) -> Path:
-        LOCAL_CALLS_DIR.mkdir(parents=True, exist_ok=True)
-        return LOCAL_CALLS_DIR / LOCAL_CALLS_FILENAME
+        local_dir = self.resource_base_dir / LOCAL_CALLS_DIR
+        local_dir.mkdir(parents=True, exist_ok=True)
+        return local_dir / LOCAL_CALLS_FILENAME
 
     def _on_load_calls_file(self) -> None:
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -2133,7 +2191,7 @@ class PotaTrainerWindow(MainWindowBase):
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="CW POTA activator simulator/trainer")
-    p.add_argument("--config", default="config.yaml", help="YAML config path.")
+    p.add_argument("--config", default=None, help="YAML config path.")
     p.add_argument("--simulate", action="store_true", help="Run stdin simulation mode.")
     p.add_argument("--list-devices", action="store_true", help="List audio devices and exit.")
     p.add_argument("--input-mode", choices=["audio", "keyboard"], default=None, help="Input mode.")
@@ -2264,7 +2322,7 @@ def _apply_cli_overrides(cfg: AppConfig, args: argparse.Namespace) -> None:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    cfg_path = Path(args.config)
+    cfg_path = _resolve_config_path(args.config, _app_base_dir())
     cfg = load_config(cfg_path)
     _apply_cli_overrides(cfg, args)
 
