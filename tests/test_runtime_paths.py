@@ -12,23 +12,27 @@ from ui.app import (
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def test_resolve_config_path_defaults_to_app_base_dir():
-    base_dir = Path.cwd() / "__bundle__"
+    base_dir = REPO_ROOT / "__bundle__"
 
     assert _resolve_config_path(None, base_dir) == base_dir / "config.yaml"
     assert _resolve_config_path("config.yaml", base_dir) == base_dir / "config.yaml"
 
 
-def test_resolve_runtime_path_prefers_existing_cwd_candidate():
-    base_dir = Path.cwd() / "__bundle__"
+def test_resolve_runtime_path_prefers_existing_cwd_candidate(monkeypatch):
+    monkeypatch.chdir(REPO_ROOT)
+    base_dir = REPO_ROOT / "__bundle__"
 
     resolved = _resolve_runtime_path("README.md", base_dir)
 
-    assert resolved == Path.cwd() / "README.md"
+    assert resolved == REPO_ROOT / "README.md"
 
 
 def test_resolve_runtime_path_falls_back_to_base_dir_for_missing_relative_file():
-    base_dir = Path.cwd() / "__bundle__"
+    base_dir = REPO_ROOT / "__bundle__"
 
     resolved = _resolve_runtime_path("missing-resource.csv", base_dir)
 
@@ -36,7 +40,7 @@ def test_resolve_runtime_path_falls_back_to_base_dir_for_missing_relative_file()
 
 
 def test_runtime_qso_config_resolves_relative_resource_files():
-    base_dir = Path.cwd() / "__bundle__"
+    base_dir = REPO_ROOT / "__bundle__"
     cfg = QSOConfig(
         other_calls_file="calls.csv",
         parks_file="parks.csv",
@@ -57,10 +61,10 @@ def test_qso_config_defaults_to_bundled_calls_file():
 def test_load_dynamic_calls_falls_back_to_bundled_default_and_persists_relative_path():
     cfg = AppConfig()
     cfg.qso.other_calls_file = "missing-calls.csv"
-    state_machine = QSOStateMachine(_runtime_qso_config(cfg.qso, Path.cwd()))
+    state_machine = QSOStateMachine(_runtime_qso_config(cfg.qso, REPO_ROOT))
     logs: list[str] = []
 
-    loaded = _load_dynamic_calls_from_config(state_machine, cfg, Path.cwd(), logs.append)
+    loaded = _load_dynamic_calls_from_config(state_machine, cfg, REPO_ROOT, logs.append)
 
     assert loaded
     assert cfg.qso.other_calls_file == str(Path("data") / "other_calls.csv")
