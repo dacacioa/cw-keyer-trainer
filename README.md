@@ -28,6 +28,12 @@ Aplicacion multiplataforma (Windows/macOS/Linux, Python 3.11+) para practicar QS
 
 > Para Windows podrás encontrar un paquete precompilado en ZIP la sección de releases (https://github.com/dacacioa/cw-keyer-trainer/releases). Descomprime la carpeta CWKeyTrainer y ejecuta el CWKeyTrainer.exe
 
+- Configura tu indicativo.
+- Verifica que estás en modo Simple
+- Dispositivo de audio de entrada o KeyBoard para trabajar con VBand o teclas CTRL
+- Carga tu base de datos de indicativos personalizados (puedes localizar base de datos aquí https://n1mmwp.hamdocs.com/mmfiles/categories/callhistory/) usando el botón Load Calls File
+- Pulsa Run y empieza a hacer QSOs.
+
 Pasos para ejecutar desde el código fuente:
 
 ```bash
