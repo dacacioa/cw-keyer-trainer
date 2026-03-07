@@ -32,11 +32,47 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Resolve build version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.release_tag }}"
+          } else {
+            $tag = "${{ github.event.release.tag_name }}"
+          }
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = "0.0.0"
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Generate Windows version resource
+        run: >
+          python scripts/write_windows_version_info.py
+          --version "${{ steps.version.outputs.tag }}"
+          --output build/windows/version_info.txt
+
       - name: Run tests
         run: python -m pytest -q
 
       - name: Build EXE with PyInstaller (onedir for faster startup)
-        run: pyinstaller --noconfirm --clean --onedir --windowed --name CWKeyTrainer --collect-all PySide6 --hidden-import sounddevice app.py
+        shell: pwsh
+        run: |
+          $args = @(
+            "--noconfirm",
+            "--clean",
+            "--onedir",
+            "--windowed",
+            "--name", "CWKeyTrainer",
+            "--collect-all", "PySide6",
+            "--hidden-import", "sounddevice",
+            "--version-file", "build/windows/version_info.txt"
+          )
+          if (Test-Path "assets/windows/app.ico") {
+            $args += @("--icon", "assets/windows/app.ico")
+          }
+          $args += "app.py"
+          pyinstaller @args
 
       - name: Package output
         shell: pwsh
