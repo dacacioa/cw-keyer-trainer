@@ -42,6 +42,3 @@ Desktop.ini
 logs/
 *.log
 
-# Local app data
-data/other_calls.csv
-

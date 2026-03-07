@@ -4,7 +4,7 @@ audio:
   output_device: 9
   blocksize: 1024
   channels: 1
-  input_mode: audio
+  input_mode: keyboard
 decoder:
   sample_rate: 48000
   frame_ms: 10.0
