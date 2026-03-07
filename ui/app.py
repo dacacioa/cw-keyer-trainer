@@ -583,12 +583,19 @@ def _load_dynamic_calls_from_config(
     base_dir: Path,
     log_fn,
 ) -> bool:
+    default_rel = LOCAL_CALLS_DIR / LOCAL_CALLS_FILENAME
+    default_path = base_dir / default_rel
     path_str = (cfg.qso.other_calls_file or "").strip()
     used_default = False
     if path_str:
         p = _resolve_runtime_path(path_str, base_dir)
+        if p is not None and (not p.exists()) and default_path.exists() and p != default_path:
+            log_fn(f"Dynamic calls file not found: {p}. Falling back to bundled default {default_path}")
+            p = default_path
+            cfg.qso.other_calls_file = str(default_rel)
+            used_default = True
     else:
-        p = base_dir / LOCAL_CALLS_DIR / LOCAL_CALLS_FILENAME
+        p = default_path
         used_default = True
     if p is None:
         return False
@@ -602,7 +609,7 @@ def _load_dynamic_calls_from_config(
     calls = load_callsigns_file(p)
     state_machine.set_other_call_pool(calls, str(p))
     if used_default:
-        cfg.qso.other_calls_file = str(p)
+        cfg.qso.other_calls_file = str(default_rel)
     log_fn(f"Dynamic calls loaded: {len(calls)} from {p}")
     return True
 
@@ -613,12 +620,19 @@ def _load_active_parks_from_config(
     base_dir: Path,
     log_fn,
 ) -> bool:
+    default_rel = LOCAL_CALLS_DIR / LOCAL_PARKS_FILENAME
+    default_path = base_dir / default_rel
     path_str = (cfg.qso.parks_file or "").strip()
     used_default = False
     if path_str:
         p = _resolve_runtime_path(path_str, base_dir)
+        if p is not None and (not p.exists()) and default_path.exists() and p != default_path:
+            log_fn(f"Parks file not found: {p}. Falling back to bundled default {default_path}")
+            p = default_path
+            cfg.qso.parks_file = str(default_rel)
+            used_default = True
     else:
-        p = base_dir / LOCAL_CALLS_DIR / LOCAL_PARKS_FILENAME
+        p = default_path
         used_default = True
     if p is None:
         return False
@@ -632,7 +646,7 @@ def _load_active_parks_from_config(
     refs = load_active_park_refs_file(p)
     state_machine.set_park_ref_pool(refs, str(p))
     if used_default:
-        cfg.qso.parks_file = str(p)
+        cfg.qso.parks_file = str(default_rel)
     log_fn(f"Active parks loaded: {len(refs)} from {p}")
     return True
 

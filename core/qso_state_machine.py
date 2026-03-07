@@ -28,7 +28,7 @@ class QSOConfig:
     other_call: str = "N1MM"
     cq_mode: str = "POTA"  # SIMPLE, POTA, SOTA
     max_stations: int = 1
-    other_calls_file: Optional[str] = None
+    other_calls_file: Optional[str] = "data/other_calls.csv"
     parks_file: Optional[str] = "data/all_parks_ext.csv"
     exchange_patterns_file: Optional[str] = "data/exchange_patterns.yaml"
     auto_incoming_after_qso: bool = False
