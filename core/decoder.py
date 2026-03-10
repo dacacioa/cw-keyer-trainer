@@ -73,6 +73,8 @@ class CWDecoder:
         self._tone_power_smooth = 0.0
         self._state_down = False
         self._state_duration = 0.0
+        self._pending_state: Optional[bool] = None
+        self._pending_duration = 0.0
 
         self._dot_estimate = float(config.dot_seconds_fixed)
         self._down_durations: Deque[float] = deque(maxlen=256)
@@ -101,6 +103,8 @@ class CWDecoder:
         self._tone_power_smooth = 0.0
         self._state_down = False
         self._state_duration = 0.0
+        self._pending_state = None
+        self._pending_duration = 0.0
         self._dot_estimate = float(self.config.dot_seconds_fixed)
         self._down_durations.clear()
         self._up_durations.clear()
@@ -115,6 +119,8 @@ class CWDecoder:
         self._tone_hz = float(self.config.target_tone_hz)
         self._noise_floor = 1e-8
         self._tone_power_smooth = 0.0
+        self._pending_state = None
+        self._pending_duration = 0.0
         self._down_durations.clear()
         self._up_durations.clear()
 
@@ -199,7 +205,7 @@ class CWDecoder:
             self._tone_power_smooth = (1.0 - alpha_p) * self._tone_power_smooth + alpha_p * tone_power_raw
         tone_power = self._tone_power_smooth
 
-        if not self._state_down:
+        if not self._state_down and self._pending_state is None:
             alpha = float(np.clip(self.config.agc_alpha, 0.001, 0.5))
             self._noise_floor = (1.0 - alpha) * self._noise_floor + alpha * tone_power
 
@@ -211,18 +217,7 @@ class CWDecoder:
         else:
             raw_down = tone_power >= threshold_on
 
-        if raw_down == self._state_down:
-            self._state_duration += self.frame_duration
-        else:
-            prev_state = self._state_down
-            prev_duration = self._state_duration
-            self._state_down = raw_down
-            self._state_duration = self.frame_duration
-            self._on_transition(prev_state, prev_duration)
-            if self._state_down:
-                self._gap_flushed_symbol = False
-                self._gap_flushed_word = False
-                self._gap_emitted_message = False
+        self._update_state(raw_down)
 
         if not self._state_down:
             self._handle_gap_progress(out_messages)
@@ -239,6 +234,52 @@ class CWDecoder:
     def _on_transition(self, prev_state_down: bool, duration: float) -> None:
         if duration <= 0.0:
             return
+        if prev_state_down:
+            self._down_durations.append(duration)
+            self._maybe_update_dot_estimate()
+            dot = self._dot_estimate
+            dash_threshold = max(1.6, float(self.config.dash_threshold_dots)) * dot
+            self._current_symbol += "." if duration < dash_threshold else "-"
+            return
+
+        self._up_durations.append(duration)
+        self._maybe_update_dot_estimate()
+        self._classify_gap(duration)
+
+    def _update_state(self, raw_down: bool) -> None:
+        if self._pending_state is None:
+            if raw_down == self._state_down:
+                self._state_duration += self.frame_duration
+                return
+            self._pending_state = raw_down
+            self._pending_duration = self.frame_duration
+            return
+
+        if raw_down == self._pending_state:
+            self._pending_duration += self.frame_duration
+            min_down, min_up = self._min_key_durations()
+            required = min_down if self._pending_state else min_up
+            if self._pending_duration < required:
+                return
+
+            prev_state = self._state_down
+            prev_duration = self._state_duration
+            self._state_down = self._pending_state
+            self._state_duration = self._pending_duration
+            self._pending_state = None
+            self._pending_duration = 0.0
+            self._on_transition(prev_state, prev_duration)
+            if self._state_down:
+                self._gap_flushed_symbol = False
+                self._gap_flushed_word = False
+                self._gap_emitted_message = False
+            return
+
+        self._state_duration += self._pending_duration + self.frame_duration
+        self._pending_state = None
+        self._pending_duration = 0.0
+
+    def _min_key_durations(self) -> Tuple[float, float]:
         dot_ref = max(self._dot_estimate, self.config.dot_ms_min / 1000.0)
         min_down = max(
             self.config.min_key_down_ms / 1000.0,
@@ -248,22 +289,7 @@ class CWDecoder:
             self.config.min_key_up_ms / 1000.0,
             float(np.clip(self.config.min_key_up_dot_ratio, 0.0, 1.0)) * dot_ref,
         )
-
-        if prev_state_down:
-            if duration < min_down:
-                return
-            self._down_durations.append(duration)
-            self._maybe_update_dot_estimate()
-            dot = self._dot_estimate
-            dash_threshold = max(1.6, float(self.config.dash_threshold_dots)) * dot
-            self._current_symbol += "." if duration < dash_threshold else "-"
-            return
-
-        if duration < min_up:
-            return
-        self._up_durations.append(duration)
-        self._maybe_update_dot_estimate()
-        self._classify_gap(duration)
+        return min_down, min_up
 
     def _classify_gap(self, gap_seconds: float) -> None:
         dot = self._dot_estimate

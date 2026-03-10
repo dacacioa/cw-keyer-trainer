@@ -16,6 +16,45 @@ def _ratio(a: str, b: str) -> float:
     return SequenceMatcher(None, _norm(a), _norm(b)).ratio()
 
 
+def _tone(duration_s: float, *, sample_rate: int, tone_hz: float, volume: float = 0.9) -> np.ndarray:
+    n = max(int(round(duration_s * sample_rate)), 1)
+    t = np.arange(n, dtype=np.float32) / float(sample_rate)
+    return (volume * np.sin(2.0 * np.pi * tone_hz * t)).astype(np.float32)
+
+
+def _decode_single_element_with_notch(*, on_segments: tuple[float, float], notch_s: float) -> str:
+    sample_rate = 16000
+    tone_hz = 700.0
+    lead_silence = np.zeros(int(round(0.1 * sample_rate)), dtype=np.float32)
+    tail_silence = np.zeros(int(round(0.5 * sample_rate)), dtype=np.float32)
+    audio = np.concatenate(
+        [
+            lead_silence,
+            _tone(on_segments[0], sample_rate=sample_rate, tone_hz=tone_hz),
+            np.zeros(int(round(notch_s * sample_rate)), dtype=np.float32),
+            _tone(on_segments[1], sample_rate=sample_rate, tone_hz=tone_hz),
+            tail_silence,
+        ],
+        dtype=np.float32,
+    )
+    dec = CWDecoder(
+        CWDecoderConfig(
+            sample_rate=sample_rate,
+            frame_ms=10.0,
+            target_tone_hz=tone_hz,
+            auto_tone=False,
+            wpm_target=20.0,
+            auto_wpm=False,
+            threshold_on_mult=2.5,
+            threshold_off_mult=1.8,
+            min_key_down_ms=12.0,
+            min_key_up_ms=12.0,
+            message_gap_dots=8.0,
+        )
+    )
+    return dec.decode_audio(audio)
+
+
 def test_roundtrip_precision_95_percent_15_25_wpm():
     message = "CQ CQ POTA DE EA4XYZ EA4XYZ K N1MM UR 5NN 5NN <CAVE>"
     for wpm in (15.0, 20.0, 25.0):
@@ -127,3 +166,13 @@ def test_noise_floor_calibration_from_samples_updates_thresholds():
     assert dec.stats.noise_floor == floor
     assert dec.stats.threshold_on == max(floor * cfg.threshold_on_mult, 1e-12)
     assert dec.stats.threshold_off == max(floor * cfg.threshold_off_mult, 1e-12)
+
+
+def test_short_drop_inside_dot_is_merged_into_single_element():
+    recovered = _decode_single_element_with_notch(on_segments=(0.025, 0.025), notch_s=0.010)
+    assert recovered == "E"
+
+
+def test_short_drop_inside_dash_is_merged_into_single_element():
+    recovered = _decode_single_element_with_notch(on_segments=(0.085, 0.085), notch_s=0.010)
+    assert recovered == "T"
